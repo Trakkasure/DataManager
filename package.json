@@ -16,5 +16,8 @@
   "devDependencies": {
     "mocha": ">=1.7.4",
     "uglify-js": ">=1.2.5"
+  },
+  "dependencies": {
+    "symbol-observable": "^1.0.1"
   }
 }

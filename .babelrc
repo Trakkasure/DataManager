@@ -1,0 +1,7 @@
+{
+	"sourceMaps": false,
+	"presets": [
+		"es2105"
+	  , "stage-1"
+	]
+}
