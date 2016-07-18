@@ -1,7 +1,8 @@
 {
 	"sourceMaps": false,
 	"presets": [
-		"es2105"
+            "es2015"
 	  , "stage-1"
+	  , "private-members-babel-plugin"
 	]
 }
