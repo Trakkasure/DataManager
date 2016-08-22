@@ -1,89 +1,89 @@
-var chai = require('./chai.js')
-  , dataManager = require("../dataManager.js").dataManager
+var dataManager = require("../dist/index.js");
+var expect = require('expect');
+var chai=require('chai');
+var crossfilter = require('crossfilter');
 
-var expect = chai.expect
-  , DM
-
-describe('DataManager', function(){
-    describe('new', function() {
-        var schema = {
-              'date' : { // filtering on the date field
-                  type: 'date' // parse into a date
-                //, filter: 'date' // a missing filter line means it will use the name of this record "date".
-                , group: {
-                      hours: {
-                        map: function(d) {
-                          d = new Date(+d)
-                          d.setHours(d.getHours(), 0, 0, 0)
-                          return d
-                        }
-                      }
-                    , quantity: {
-                          reduce : 'sum' // reduce by summing
-                        // If not specifying this field, then use the dimension filter field
-                        //, map: 'date' // group by date. Dates are by day anyhow
-                        , sum: 'quantity' // sum the invoice quantity field.
-                      }
-                    , total: {
-                          reduce : 'sum' // reduce by summing
-                        , sum: 'total' // sum the total bill field
-                      }
-                    , tip: {
-                          reduce : 'sum' // reduce by summing
-                        , sum: 'tip' // sum the tip field
-                      }
-                    , items: {
-                          //reduce : 'sum' // reduce is missing. Assumes count.
-                      }
-                  }
-              }
-            , 'qty': { // this is an arbitrary name used to access this filter.
-                  type: 'integer'
-                , filter: 'quantity' // use the quantity field as a 
-                , group: {
-                      invoice: {
-                          reduce:'sum' // Want to sum in reduce.
-                        , sum: 'invoice_quantity' // field to sum by.
-                      }
-                    , total: {
-                          reduce : 'sum' // reduce by summing
-                        , sum: 'total' // sum the total bill field
-                      }
-                    , tip: {
-                          reduce : 'sum' // reduce by summing
-                        , sum: 'tip' // sum the tip field
-                      }
-                  }
-              }
-            , 'total': {
-                  type: 'integer'
-              }
-            , 'tip': {
-                  type: 'integer'
-              }
-            , 'type': {
-                  type: 'string'
-                , group: {
-                      quantity: {
-                          reduce : 'sum' // reduce by summing
-                        // If not specifying this field, then use the dimension filter field
-                        //, map: 'date' // group by date. Dates are by day anyhow
-                        , sum: 'quantity' // sum the invoice quantity field.
-                      }
-                    , total: {
-                          reduce : 'sum' // reduce by summing
-                        , sum: 'total' // sum the total bill field
-                      }
-                    , tip: {
-                          reduce : 'sum' // reduce by summing
-                        , sum: 'tip' // sum the tip field
-                      }
-                    , items: {
-                          //reduce : 'sum' // reduce is missing. Assumes count.
-                      }
-                  }
-              }
-         }
+var schema = {
+    "date" : { // filtering on the date field
+        "type": "date" // parse into a date
+      //, filter: "date" // a missing filter line means it will use the name of this record "date".
+      , "group": {
+            "hours": {
+                "map": function(d) {
+                  d = new Date(+d)
+                  d.setHours(d.getHours(), 0, 0, 0)
+                  return d
+                }
+            }
+          , "quantity": {
+                "reduce" : "sum" // reduce by summing
+                // If not specifying this field, then use the dimension filter field
+                //, map: "date" // group by date. Dates are by day anyhow
+              , "sum": "quantity" // sum the invoice quantity field.
+            }
+          , "total": {
+                "reduce" : "sum" // reduce by summing
+              , "sum": "total" // sum the total bill field
+            }
+          , "tip": {
+                "reduce" : "sum" // reduce by summing
+              , "sum": "tip" // sum the tip field
+            }
+          , "items": {
+            //reduce : "sum" // reduce is missing. Assumes count.
+            }
+        }
+    }
+  , "qty": { // this is an arbitrary name used to access this filter.
+        "type": "integer"
+      , "filter": "quantity" // use the quantity field to filter
+      , "group": {
+            "invoice": {
+                "reduce":"sum" // Want to sum in reduce.
+              , "sum": "invoice_quantity" // field to sum by.
+            }
+          , "total": {
+                "reduce" : "sum" // reduce by summing
+              , "sum": "total" // sum the total bill field
+            }
+          , "tip": {
+                "reduce" : "sum" // reduce by summing
+              , "sum": "tip" // sum the tip field
+            }
+        }
+    }
+  , "total": {  // Importing the field without grouping it.
+        "type": "integer"
+    }
+  , "tip": {  // Importing the field without grouping it.
+        "type": "integer"
+    }
+  , "type": {
+        "type": "string"
+      , "group": {
+            "quantity": {
+                "reduce" : "sum" // reduce by summing
+                // If not specifying this field, then use the dimension filter field
+                //, map: "date" // group by date. Dates are by day anyhow
+              , "sum": "quantity" // sum the invoice quantity field.
+            }
+          , 'types': {
+              'reduce': 'count'
+            }
+          , "total": {
+                "reduce" : "sum" // reduce by summing
+              , "sum": "total" // sum the total bill field
+            }
+          , "tip": {
+                "reduce" : "sum" // reduce by summing
+              , "sum": "tip" // sum the tip field
+            }
+          , "items": {
+                //reduce : "sum" // reduce is missing. Assumes count.
+            }
+        }
+    }
+}
          // Typically data retrieved via JSON has all values quoted
         var cfData = [
           {"date": "2011-11-14T16:17:54Z", "quantity": "2", "total": "190", "tip": "100", "type": "tab"},
@@ -130,15 +130,12 @@ describe('DataManager', function(){
           {"date": "2011-11-14T23:23:29Z", "quantity": "2", "total": "190", "tip": "100", "type": "tab"},
           {"date": "2011-11-14T23:28:54Z", "quantity": "2", "total": "190", "tip": "100", "type": "tab"}
         ]
-        describe('Initialize', function(){
-            it('should initialize', function(){
-              DM = new dataManager()
-              expect(DM).to.be.a('object')
-            })
-            it('should properly parse the data from schema', function(){
+              DM = new dataManager(crossfilter);
+
+              expect(DM).toBeA('object');
                  // Need to check schema stuf
-                DM.schema(schema)
-                DM.setData(cfData)
+                DM.schema(schema);
+                DM.setData(cfData);
                 var d = DM.getDimension('total').top(1)[0];
                 [
                     {date:Date}
@@ -148,516 +145,400 @@ describe('DataManager', function(){
                   , {type:'string'}
                 ]
                 .forEach(function(t) {
-                    var k = Object.keys(t)[0]
-                    if ('string' === typeof t[k])
-                        expect(d[k]).to.be.a(t[k])
-                    else
-                        expect(d[k]).to.be.an.instanceof(t[k])
+                    var k = Object.keys(t)[0];
+                    expect(d[k]).toBeAn(t[k]);
                 })
-            })
-        })
-        describe('extents, and relationships: ',function() {
-            describe('top: ',function() {
-                it("should return the top k records by value, in descending order", function() {
-                  expect(DM.getDimension('total').top(3).slice(0)).to.deep.equal([
+                  expect(DM.getDimension('total').top(3).slice(0)).toInclude([
                     {date: (new Date("2011-11-14T16:28:54Z")), quantity: 1, total: 300, tip: 200, type: "visa"},
                     {date: (new Date("2011-11-14T20:49:07Z")), quantity: 2, total: 290, tip: 200, type: "tab"},
                     {date: (new Date("2011-11-14T21:18:48Z")), quantity: 4, total: 270, tip: 0, type: "tab"}
-                  ])
-                  expect(DM.getDimension('date').top(3).slice(0)).to.deep.equal([
+                  ],function(b,a){return expect(a).toInclude(b);});
+                  expect(DM.getDimension('date').top(3).slice(0)).toInclude([
                     {date: (new Date("2011-11-14T23:28:54Z")), quantity: 2, total: 190, tip: 100, type: "tab"},
                     {date: (new Date("2011-11-14T23:23:29Z")), quantity: 2, total: 190, tip: 100, type: "tab"},
                     {date: (new Date("2011-11-14T23:21:22Z")), quantity: 2, total: 190, tip: 100, type: "tab"}
-                  ])
-                })
-                it("observes the associated dimension's filters", function() {
+                  ],function(b,a){return expect(a).toInclude(b);})
                   try {
                     DM.filter('qty',4)
-                    expect(DM.getDimension('total').top(3).slice(0)).to.deep.equal([
+                    expect(DM.getDimension('total').top(3).slice(0)).toInclude([
                       {date: "2011-11-14T21:18:48Z", quantity: 4, total: 270, tip: 0, type: "tab"}
-                    ])
+                    ],function(b,a){return expect(a).toInclude(b);})
                   } catch (e) { }
 
-                })
-                it("properly resets dimension's filters", function() {
                   DM.filter('qty',DM.NONE) // filter-all
-                  expect(DM.getDimension('total').top(3).slice(0)).to.deep.equal([
+                  expect(DM.getDimension('total').top(3).slice(0)).toInclude([
                     {date: (new Date("2011-11-14T16:28:54Z")), quantity: 1, total: 300, tip: 200, type: "visa"},
                     {date: (new Date("2011-11-14T20:49:07Z")), quantity: 2, total: 290, tip: 200, type: "tab"},
                     {date: (new Date("2011-11-14T21:18:48Z")), quantity: 4, total: 270, tip: 0, type: "tab"}
-                  ])
-                })
-                it("properly uses date ranges for dimension's filters", function() {
+                  ],function(b,a){return expect(a).toInclude(b);})
 
                   try {
                     DM.filter('date',[new Date(Date.UTC(2011, 10, 14, 19)), new Date(Date.UTC(2011, 10, 14, 20))]);
-                    expect(DM.getDimension('date').top(10).slice(0)).to.deep.equal([
+                    expect(DM.getDimension('date').top(10).slice(0)).toInclude([
                       {date: new Date("2011-11-14T19:30:44Z"), quantity: 2, total: 90, tip: 0, type: "tab"},
                       {date: new Date("2011-11-14T19:04:22Z"), quantity: 2, total: 90, tip: 0, type: "tab"},
                       {date: new Date("2011-11-14T19:00:31Z"), quantity: 2, total: 190, tip: 100, type: "tab"}
-                    ])
+                    ],function(b,a){return expect(a).toInclude(b);})
                     DM.filter('date',[Date.UTC(2011, 10, 14, 19), Date.UTC(2011, 10, 14, 20)]);
-                    expect(DM.getDimension('date').top(10).slice(0)).to.deep.equal([
+                    expect(DM.getDimension('date').top(10).slice(0)).toInclude([
                       {date: new Date("2011-11-14T19:30:44Z"), quantity: 2, total: 90, tip: 0, type: "tab"},
                       {date: new Date("2011-11-14T19:04:22Z"), quantity: 2, total: 90, tip: 0, type: "tab"},
                       {date: new Date("2011-11-14T19:00:31Z"), quantity: 2, total: 190, tip: 100, type: "tab"}
-                    ])
+                    ],function(b,a){return expect(a).toInclude(b);})
                   } finally {
                     DM.filter('date',DM.NONE)
                   }
-                })
-                it("observes other dimensions' filters", function() {
                   try {
                     DM.filter('type','tab')
-                    expect(DM.getDimension('total').top(2).slice(0)).to.deep.equal([
+                    expect(DM.getDimension('total').top(2).slice(0)).toInclude([
                       {date: new Date("2011-11-14T20:49:07Z"), quantity: 2, total: 290, tip: 200, type: "tab"},
                       {date: new Date("2011-11-14T21:18:48Z"), quantity: 4, total: 270, tip: 0, type: "tab"}
-                    ])
+                    ],function(b,a){return expect(a).toInclude(b);})
                     DM.filter('type','visa')
-                    expect(DM.getDimension('total').top(1).slice(0)).to.deep.equal([
+                    expect(DM.getDimension('total').top(1).slice(0)).toInclude([
                       {date: new Date("2011-11-14T16:28:54Z"), quantity: 1, total: 300, tip: 200, type: "visa"}
-                    ])
+                    ],function(b,a){return expect(a).toInclude(b);})
                     DM.filter('qty',2)
-                    expect(DM.getDimension('tip').top(1).slice(0)).to.deep.equal([
+                    expect(DM.getDimension('tip').top(1).slice(0)).toInclude([
                       {date: new Date("2011-11-14T17:38:40Z"), quantity: 2, total: 200, tip: 100, type: "visa"}
-                    ])
+                    ],function(b,a){return expect(a).toInclude(b);})
                   } finally {
                     DM.filter('qty',DM.NONE)
                     DM.filter('type',DM.NONE)
                   }
                   try {
                     DM.filter('type','tab')
-                    expect(DM.getDimension('date').top(2).slice(0)).to.deep.equal([
+                    expect(DM.getDimension('date').top(2).slice(0)).toInclude([
                       {date: new Date("2011-11-14T23:28:54Z"), quantity: 2, total: 190, tip: 100, type: "tab"},
                       {date: new Date("2011-11-14T23:23:29Z"), quantity: 2, total: 190, tip: 100, type: "tab"}
-                    ])
+                    ],function(b,a){return expect(a).toInclude(b);})
                     DM.filter('type','visa')
-                    expect(DM.getDimension('date').top(1).slice(0)).to.deep.equal([
+                    expect(DM.getDimension('date').top(1).slice(0)).toInclude([
                       {date: new Date("2011-11-14T23:16:09Z"), quantity: 1, total: 200, tip: 100, type: "visa"}
-                    ])
+                    ],function(b,a){return expect(a).toInclude(b);})
                     DM.filter('qty',2)
-                    expect(DM.getDimension('date').top(1).slice(0)).to.deep.equal([
+                    expect(DM.getDimension('date').top(1).slice(0)).toInclude([
                       {date: new Date("2011-11-14T22:58:54Z"), quantity: 2, total: 100, tip: 0, type: "visa"}
-                    ])
+                    ],function(b,a){return expect(a).toInclude(b);})
                   } finally {
                     DM.filter('qty',DM.NONE)
                     DM.filter('type',DM.NONE)
                   }
-                })
-                it("negative or zero k returns an empty array", function() {
+
                   expect(
-                    DM.getDimension('qty').top(0)
-                  ).to.deep.equal([])
+                    DM.getDimension('qty').top(0).length
+                  ).toBe(0);
                   expect(
-                    DM.getDimension('qty').top(-1)
-                  ).to.deep.equal([])
+                    DM.getDimension('qty').top(-1).length
+                  ).toBe(0);
                   expect(
-                    DM.getDimension('qty').top(NaN)
-                  ).to.deep.equal([])
+                    DM.getDimension('qty').top(NaN).length
+                  ).toBe(0);
                   expect(
-                    DM.getDimension('qty').top(-Infinity)
-                  ).to.deep.equal([])
+                    DM.getDimension('qty').top(-Infinity).length
+                  ).toBe(0);
                   expect(
-                    DM.getDimension('date').top(0)
-                  ).to.deep.equal([])
+                    DM.getDimension('date').top(0).length
+                  ).toBe(0);
                   expect(
-                    DM.getDimension('date').top(-1)
-                  ).to.deep.equal([])
+                    DM.getDimension('date').top(-1).length
+                  ).toBe(0);
                   expect(
-                    DM.getDimension('date').top(NaN)
-                  ).to.deep.equal([])
+                    DM.getDimension('date').top(NaN).length
+                  ).toBe(0);
                   expect(
-                    DM.getDimension('date').top(-Infinity)
-                  ).to.deep.equal([])
-                })
-            })
-            describe('bottom: ',function() {
-                it("should return the bottom k records by value, in descending order", function() {
-                  expect(DM.getDimension('total').bottom(3).slice(0)).to.deep.equal([
+                    DM.getDimension('date').top(-Infinity).length
+                  ).toBe(0);
+
+                  expect(DM.getDimension('total').bottom(3).slice(0)).toInclude([
                     {date: new Date("2011-11-14T22:30:22Z"), quantity: 2, total: 89, tip: 0, type: "tab"},
                     {date: new Date("2011-11-14T16:30:43Z"), quantity: 2, total: 90, tip: 0, type: "tab"},
                     {date: new Date("2011-11-14T16:48:46Z"), quantity: 2, total: 90, tip: 0, type: "tab"}
-                  ])
-                  expect(DM.getDimension('date').bottom(3).slice(0)).to.deep.equal([
+                  ],function(b,a){return expect(a).toInclude(b);})
+                  expect(DM.getDimension('date').bottom(3).slice(0)).toInclude([
                     {date: new Date("2011-11-14T16:17:54Z"), quantity: 2, total: 190, tip: 100, type: "tab"},
                     {date: new Date("2011-11-14T16:20:19Z"), quantity: 2, total: 190, tip: 100, type: "tab"},
                     {date: new Date("2011-11-14T16:28:54Z"), quantity: 1, total: 300, tip: 200, type: "visa"}
-                  ])
-                })
-                it("observes the associated dimension's filters", function() {
+                  ],function(b,a){return expect(a).toInclude(b);})
+
                   try {
                     DM.filter('qty',4)
-                    expect(DM.getDimension('total').bottom(3).slice(0)).to.deep.equal([
+                    expect(DM.getDimension('total').bottom(3).slice(0)).toInclude([
                       {date: new Date("2011-11-14T21:18:48Z"), quantity: 4, total: 270, tip: 0, type: "tab"}
-                    ])
+                    ],function(b,a){return expect(a).toInclude(b);})
                   } finally {
                     DM.filter('qty',DM.NONE) // filter-all
                   }
-                  expect(DM.getDimension('total').bottom(3).slice(0)).to.deep.equal([
+                  expect(DM.getDimension('total').bottom(3).slice(0)).toInclude([
                     {date: new Date("2011-11-14T22:30:22Z"), quantity: 2, total: 89, tip: 0, type: "tab"},
                     {date: new Date("2011-11-14T16:30:43Z"), quantity: 2, total: 90, tip: 0, type: "tab"},
                     {date: new Date("2011-11-14T16:48:46Z"), quantity: 2, total: 90, tip: 0, type: "tab"}
-                  ])
+                  ],function(b,a){return expect(a).toInclude(b);})
 
                   try {
                     DM.filter('date',[new Date(Date.UTC(2011, 10, 14, 19)), new Date(Date.UTC(2011, 10, 14, 20))]);
-                    expect(DM.getDimension('date').bottom(10).slice(0)).to.deep.equal([
+                    expect(DM.getDimension('date').bottom(10).slice(0)).toInclude([
                       {date: new Date("2011-11-14T19:00:31Z"), quantity: 2, total: 190, tip: 100, type: "tab"},
                       {date: new Date("2011-11-14T19:04:22Z"), quantity: 2, total: 90, tip: 0, type: "tab"},
                       {date: new Date("2011-11-14T19:30:44Z"), quantity: 2, total: 90, tip: 0, type: "tab"}
-                    ])
+                    ],function(b,a){return expect(a).toInclude(b);})
                     DM.filter('date',[Date.UTC(2011, 10, 14, 19), Date.UTC(2011, 10, 14, 20)]);
-                    expect(DM.getDimension('date').bottom(10).slice(0)).to.deep.equal([
+                    expect(DM.getDimension('date').bottom(10).slice(0)).toInclude([
                       {date: new Date("2011-11-14T19:00:31Z"), quantity: 2, total: 190, type: "tab", tip: 100},
                       {date: new Date("2011-11-14T19:04:22Z"), quantity: 2, total: 90, type: "tab", tip: 0},
                       {date: new Date("2011-11-14T19:30:44Z"), quantity: 2, total: 90, type: "tab", tip: 0}
-                    ])
+                    ],function(b,a){return expect(a).toInclude(b);})
                   } finally {
                     DM.filter('date',DM.NONE)
                   }
-                })
-                it("observes other dimensions' filters", function() {
                   try {
                     DM.filter('type','tab')
-                    expect(DM.getDimension('total').bottom(2).slice(0)).to.deep.equal([
+                    expect(DM.getDimension('total').bottom(2).slice(0)).toInclude([
                       {date: new Date("2011-11-14T22:30:22Z"), quantity: 2, total: 89, tip: 0, type: "tab"},
                       {date: new Date("2011-11-14T16:30:43Z"), quantity: 2, total: 90, tip: 0, type: "tab"}
-                    ])
+                    ],function(b,a){return expect(a).toInclude(b);})
                     DM.filter('type','visa')
-                    expect(DM.getDimension('total').bottom(1).slice(0)).to.deep.equal([
+                    expect(DM.getDimension('total').bottom(1).slice(0)).toInclude([
                       {date: new Date("2011-11-14T22:58:54Z"), quantity: 2, total: 100, tip: 0, type: "visa"}
-                    ])
+                    ],function(b,a){return expect(a).toInclude(b);})
                     DM.filter('qty',2)
-                    expect(DM.getDimension('tip').bottom(1).slice(0)).to.deep.equal([
+                    expect(DM.getDimension('tip').bottom(1).slice(0)).toInclude([
                       {date: new Date("2011-11-14T22:58:54Z"), quantity: 2, total: 100, tip: 0, type: "visa"}
-                    ])
+                    ],function(b,a){return expect(a).toInclude(b);})
                   } finally {
                     DM.filter('qty',DM.NONE)
                     DM.filter('type',DM.NONE)
                   }
                   try {
                     DM.filter('type','tab')
-                    expect(DM.getDimension('date').bottom(2).slice(0)).to.deep.equal([
+                    expect(DM.getDimension('date').bottom(2).slice(0)).toInclude([
                       {date: new Date("2011-11-14T16:17:54Z"), quantity: 2, total: 190, tip: 100, type: "tab"},
                       {date: new Date("2011-11-14T16:20:19Z"), quantity: 2, total: 190, tip: 100, type: "tab"}
-                    ])
+                    ],function(b,a){return expect(a).toInclude(b);})
                     DM.filter('type','visa')
-                    expect(DM.getDimension('date').bottom(1).slice(0)).to.deep.equal([
+                    expect(DM.getDimension('date').bottom(1).slice(0)).toInclude([
                       {date: new Date("2011-11-14T16:28:54Z"), quantity: 1, total: 300, tip: 200, type: "visa"}
-                    ])
+                    ],function(b,a){return expect(a).toInclude(b);})
                     DM.filter('qty',2)
-                    expect(DM.getDimension('date').bottom(1).slice(0)).to.deep.equal([
+                    expect(DM.getDimension('date').bottom(1).slice(0)).toInclude([
                       {date: new Date("2011-11-14T17:38:40Z"), quantity: 2, total: 200, tip: 100, type: "visa"}
-                    ])
+                    ],function(b,a){return expect(a).toInclude(b);})
                   } finally {
                     DM.filter('qty',DM.NONE)
                     DM.filter('type',DM.NONE)
                   }
-                })
-                it("negative or zero k returns an empty array", function() {
-                  expect(
-                    DM.getDimension('qty').bottom(0)
-                  ).to.deep.equal([])
-                  expect(
-                    DM.getDimension('qty').bottom(-1)
-                  ).to.deep.equal([])
-                  expect(
-                    DM.getDimension('qty').bottom(NaN)
-                  ).to.deep.equal([])
-                  expect(
-                    DM.getDimension('qty').bottom(-Infinity)
-                  ).to.deep.equal([])
-                  expect(
-                    DM.getDimension('date').bottom(0)
-                  ).to.deep.equal([])
-                  expect(
-                    DM.getDimension('date').bottom(-1)
-                  ).to.deep.equal([])
-                  expect(
-                    DM.getDimension('date').bottom(NaN)
-                  ).to.deep.equal([])
-                  expect(
-                    DM.getDimension('date').bottom(-Infinity)
-                  ).to.deep.equal([])
-                })
-            })
-        })
 
-        describe('filter: ',function() {
-            describe('filterExact(): ',function() {
-                it("should select records that match the specified value exactly", function() {
+                  expect(
+                    DM.getDimension('qty').top(0).length
+                  ).toBe(0);
+                  expect(
+                    DM.getDimension('qty').top(-1).length
+                  ).toBe(0);
+                  expect(
+                    DM.getDimension('qty').top(NaN).length
+                  ).toBe(0);
+                  expect(
+                    DM.getDimension('qty').top(-Infinity).length
+                  ).toBe(0);
+                  expect(
+                    DM.getDimension('date').top(0).length
+                  ).toBe(0);
+                  expect(
+                    DM.getDimension('date').top(-1).length
+                  ).toBe(0);
+                  expect(
+                    DM.getDimension('date').top(NaN).length
+                  ).toBe(0);
+                  expect(
+                    DM.getDimension('date').top(-Infinity).length
+                  ).toBe(0);
+
                   try {
                     DM.filter('tip',100)
-                    expect(DM.getDimension('date').top(2).slice(0)).to.deep.equal([
+                    expect(DM.getDimension('date').top(2).slice(0)).toInclude([
                       {date: new Date("2011-11-14T23:28:54Z"), quantity: 2, total: 190, tip: 100, type: "tab"},
                       {date: new Date("2011-11-14T23:23:29Z"), quantity: 2, total: 190, tip: 100, type: "tab"}
-                    ])
+                    ],function(b,a){return expect(a).toInclude(b);})
                   } finally {
                     DM.filter('tip',DM.NONE)
                   }
-                })
-                it("should allow the filter value to be null", function() {
                     try {
                       DM.filter('tip',null)
-                      expect(DM.getDimension('date').top(2).slice(0)).to.deep.equal([
+                      expect(DM.getDimension('date').top(2).slice(0)).toInclude([
                         {date: new Date("2011-11-14T22:58:54Z"), quantity: 2, total: 100, tip: 0, type: "visa"},
                         {date: new Date("2011-11-14T22:48:05Z"), quantity: 2, total: 91, tip: 0, type: "tab"}
-                      ])
+                      ],function(b,a){return expect(a).toInclude(b);})
                     } finally {
                       DM.filter('tip',DM.NONE)
                     }
-                })
-            })
 
-            describe('filterRange(): ',function() {
-              it("should select records greater than or equal to the inclusive lower bound", function() {
                 try {
                   DM.filter('total',[100,190])
-                  expect(DM.getDimension('date').top(Infinity).slice(0).every(function(d) { return d.total >= 100; })).to.be.true
+                  expect(DM.getDimension('date').top(Infinity).slice(0).every(function(d) { return d.total >= 100; })).toBe(true)
                   DM.filter('total',[110,190])
-                  expect(DM.getDimension('date').top(Infinity).slice(0).every(function(d) { return d.total >= 110; })).to.be.true
+                  expect(DM.getDimension('date').top(Infinity).slice(0).every(function(d) { return d.total >= 110; })).toBe(true)
                 } finally {
                   DM.filter('total',DM.NONE)
                 }
-              })
-              it("should select records less than the exclusive lower bound", function() {
                 try {
                   DM.filter('total',[100,200])
-                  expect(DM.getDimension('date').top(Infinity).slice(0).every(function(d) { return d.total < 200; })).to.be.true
+                  expect(DM.getDimension('date').top(Infinity).slice(0).every(function(d) { return d.total < 200; })).toBe(true)
                   DM.filter('total',[100,190])
-                  expect(DM.getDimension('date').top(Infinity).slice(0).every(function(d) { return d.total < 190; })).to.be.true
+                  expect(DM.getDimension('date').top(Infinity).slice(0).every(function(d) { return d.total < 190; })).toBe(true)
                 } finally {
                   DM.filter('total',DM.NONE)
                 }
-              })
-            })
-
-            describe('filterAll(): ',function() {
-                it("should clear the filter", function() {
                   DM.filter('total',[100,200])
-                  expect(DM.getDimension('date').top(Infinity).slice(0).length).to.be.below(43)
+                  expect(DM.getDimension('date').top(Infinity).slice(0).length).toBeLessThan(43)
                   DM.filter('total',DM.NONE)
-                  expect(DM.getDimension('date').top(Infinity).slice(0).length).to.equal(43)
-                })
-            })
+                  expect(DM.getDimension('date').top(Infinity).slice(0).length).toBe(43)
 
-            describe('union(): ',function() {
-              it("can be passed multiple arguments and returns union of filters", function() {
                 try {
                   DM.filter('total',[0, 100], 190, [200, 300])
+                  expect(DM.getDimension('total').top(Infinity).length).toBe(38)
                   expect(DM.getDimension('total').top(Infinity).slice(0).every(function(d){
                     return d.total >= 0 && d.total < 100 || d.total >= 200 && d.total < 300 || d.total == 190;
-                  })).to.be.true
-                  expect(DM.getDimension('total').top(Infinity).length).to.equal(38)
+                  })).toBe(true)
                 } finally {
                   DM.filter('total',DM.NONE)
                 }
-              })
-              it("groupAll() works after union of filters followed by single filter", function() {
                 try {
                   DM.filter('total',[0, 100], 190, [200, 300])
                   DM.filter('total',[200, 300])
-                  expect(DM.all().value()).to.equal(8)
+                  expect(DM.all().value()).toBe(8)
                 } finally {
                   DM.filter('total',DM.NONE)
                 }
-              })
-              it("union of filters operation returns the data manager", function() {
                 try {
-                  expect(DM.filter('total',190, [0, 100], [200, 300])).to.equal(DM);
+                  expect(DM.filter('total',190, [0, 100], [200, 300])).toBe(DM);
                 } finally {
                   DM.filter('total',DM.NONE)
                 }
-              })
-              it("union of filters supports overlapping ranges", function() {
                 try {
                   DM.filter('total',[0, 200], 190);
-                  expect(DM.getDimension('total').top(Infinity).length).to.equal(34)
+                  expect(DM.getDimension('total').top(Infinity).length).toBe(34)
                 } finally {
                   DM.filter('total',DM.NONE)
                 }
-              })
-              it("supports custom filter function", function() {
                 try {
                   DM.filter('total',function(d) { return d === 100; })
                   expect(DM.getDimension('total').top(Infinity).every(function(d) {
                     return d.total === 100
-                  })).to.be.true
-                  expect(DM.getDimension('total').top(Infinity).length).to.equal(4)
+                  })).toBe(true)
+                  expect(DM.getDimension('total').top(Infinity).length).toBe(4)
                 } finally {
                   DM.filter('total',DM.NONE)
                 }
-              })
-              it("two custom filter functions and groupAll() calls in a row", function() {
                 try {
                   DM.filter('total',function(d) { return d === 190; })
                   DM.all().value()
                   DM.filter('total',function(d) { return d === 100; })
-                  expect(DM.all().value()).to.equal(4)
-                  expect(DM.getDimension('total').top(Infinity).length).to.equal(4)
+                  expect(DM.all().value()).toBe(4)
+                  expect(DM.getDimension('total').top(Infinity).length).toBe(4)
                 } finally {
                   DM.filter('total',DM.NONE)
                 }
-              })
-            })
-        })
 
-        describe('Grouping: ',function() {
-            describe("groupAll (count, the default)",function() {
-              var quantityCount
+              var quantityCount = DM.getDimension('qty').groupAll()
+              expect(quantityCount).toNotIncludeKeys(['top','order'])
 
-              it("does not have top and order methods", function() {
-                quantityCount = DM.getDimension('qty').groupAll()
-                expect(quantityCount).to.not.contain.keys('top','order')
-              })
-
-              describe("reduce", function() {
-                it("reduces by add, remove, and initial", function() {
                   try {
                     quantityCount.reduce(
                         function(p, v) { return p + v.total },
                         function(p, v) { return p - v.total },
                         function() { return 0 })
-                    expect(quantityCount.value()).to.equal(6660)
+                    expect(quantityCount.value()).toBe(6660)
                   } finally {
                     quantityCount.reduceCount()
                   }
-                })
-              })
 
-              describe("reduceCount", function() {
-                it("reduces by count", function() {
                   quantityCount.reduceSum(function(d) { return d.total })
-                  expect(quantityCount.value()).to.equal(6660)
+                  expect(quantityCount.value()).toBe(6660)
                   quantityCount.reduceCount()
-                  expect(quantityCount.value()).to.equal(43)
-                })
-              })
+                  expect(quantityCount.value()).toBe(43)
 
-              describe("reduceSum",function() {
-                it("reduces by sum of accessor function", function() {
                   try {
                     quantityCount.reduceSum(function(d) { return d.total })
-                    expect(quantityCount.value()).to.equal(6660)
+                    expect(quantityCount.value()).toBe(6660)
                     quantityCount.reduceSum(function() { return 1 })
-                    expect(quantityCount.value()).to.equal(43)
+                    expect(quantityCount.value()).toBe(43)
                   } finally {
                     quantityCount.reduceCount();
                   }
-                })
-              })
 
-              describe("value",function() {
-                it("returns the count of matching records", function() {
-                    expect(quantityCount.value()).to.equal(43)
-                })
-                it("does not observe the associated dimension's filters", function() {
+                    expect(quantityCount.value()).toBe(43)
                   try {
                     DM.filter('qty',[100, 200])
-                    expect(quantityCount.value()).to.equal(43)
+                    expect(quantityCount.value()).toBe(43)
                   } finally {
                     DM.filter('qty',DM.NONE)
                   }
-                })
-                it("observes other dimensions' filters", function() {
                   try {
                     DM.filter('type',"tab")
-                    expect(quantityCount.value()).to.equal(32)
+                    expect(quantityCount.value()).toBe(32)
                     DM.filter('type',"visa")
-                    expect(quantityCount.value()).to.equal(7)
+                    expect(quantityCount.value()).toBe(7)
                     DM.filter('tip',100)
-                    expect(quantityCount.value()).to.equal(5)
+                    expect(quantityCount.value()).toBe(5)
                   } finally {
                     DM.filter('type',DM.NONE)
                     DM.filter('tip',DM.NONE)
                   }
-                })
-              })
-            })
 
-            describe("groupAll (sum of total)",function() {
-                var quantityTotal
+                var quantityTotal = DM.getDimension('qty').groupAll().reduceSum(function(d) { return d.total })
+                expect(quantityTotal).toNotIncludeKeys(['top','order'])
 
-              it("does not have top and order methods", function() {
-                quantityTotal = DM.getDimension('qty').groupAll().reduceSum(function(d) { return d.total })
-                expect(quantityTotal).to.not.contain.keys('top','order')
-              })
-
-              describe("reduce",function() {
-                it("determines the computed reduce value", function() {
                   try {
                     quantityTotal.reduce(
                         function(p) { return p + 1; },
                         function(p) { return p - 1; },
                         function() { return 0 })
-                    expect(quantityTotal.value()).to.equal(43)
+                    expect(quantityTotal.value()).toBe(43)
                   } finally {
                     quantityTotal.reduceSum(function(d) { return d.total })
                   }
-                })
-              })
 
-              describe("value",function() {
-                it("returns the sum total of matching records", function() {
-                    expect(quantityTotal.value()).to.equal(6660)
-                })
-                it("does not observe the associated dimension's filters", function() {
+                    expect(quantityTotal.value()).toBe(6660)
                   try {
                     DM.filter('qty',[100, 200])
-                    expect(quantityTotal.value()).to.equal(6660)
+                    expect(quantityTotal.value()).toBe(6660)
                   } finally {
                     DM.filter('qty',DM.NONE)
                   }
-                })
-                it("observes other dimensions' filters", function() {
                   try {
                     DM.filter('type',"tab")
-                    expect(quantityTotal.value()).to.equal(4760)
+                    expect(quantityTotal.value()).toBe(4760)
                     DM.filter('type',"visa")
-                    expect(quantityTotal.value()).to.equal(1400)
+                    expect(quantityTotal.value()).toBe(1400)
                     DM.filter('tip',100)
-                    expect(quantityTotal.value()).to.equal(1000)
+                    expect(quantityTotal.value()).toBe(1000)
                   } finally {
                     DM.filter('type',DM.NONE)
                     DM.filter('tip',DM.NONE)
                   }
-                })
-              })
-            })
-          })
 
-          describe("group", function() {
             //data.date.hours = data.date.group(function(d) { d = new Date(+d); d.setHours(d.getHours(), 0, 0, 0); return d; });
             //data.type.types = data.type.group();
 
-            it("key defaults to value", function() {
-              assert.deepEqual(DM.group('type').top(Infinity), [
-                  {key: "tab", value: 32}
-                , {key: "visa", value: 7}
-                , {key: "cash", value: 4}
-              ])
-            })
+                expect(DM.group('type','types').top(Infinity)).toInclude([
+                    {key: "tab", value: 32}
+                  , {key: "visa", value: 7}
+                  , {key: "cash", value: 4}
+                ],function(b,a){return expect(a).toInclude(b);})
 
-            describe("size", function() {
-              it("returns the cardinality", function() {
-                assert.equal(data.date.hours.size(), 8)
-                assert.equal(data.type.types.size(), 3)
-              })
-              it("ignores any filters", function() {
+                expect(DM.group('date','hours').size()).toBe(8)
+                expect(DM.group('type','types').size()).toBe(3)
                 try {
-                  data.type.filterExact("tab")
-                  data.quantity.filterRange([100, 200])
-                  assert.equal(data.date.hours.size(), 8)
-                  assert.equal(data.type.types.size(), 3)
+                  DM.filter('type',"tab");
+                  DM.filter('qty',[100, 200]);
+                  expect(DM.group('date','hours').size()).toBe(8)
+                  expect(DM.group('type','types').size()).toBe(3)
                 } finally {
-                  data.quantity.filterAll()
-                  data.type.filterAll()
+                  DM.filter('qty',DM.NONE);
+                  DM.filter('type',DM.NONE);
                 }
-              })
-            })
 
-            describe("reduce", function() {
-              it("defaults to count", function() {
+/* 
                 assert.deepEqual(data.date.hours.top(1), [
                   {key: new Date(Date.UTC(2011, 10, 14, 17, 00, 00)), value: 9}
                 ])
@@ -717,7 +598,6 @@ describe('DataManager', function(){
                 }
               })
             })
-          })
 
           describe("remove", function() {
             it("should remove dimension", function() {
@@ -737,14 +617,14 @@ describe('DataManager', function(){
               data.all = DM.all().reduceSum(function(d) { return d.total })
 
             it("does not have top and order methods", function() {
-                expect(data.all).to.not.contain.keys('top','order')
+                expect(data.all).toNotIncludeKeys(['top','order'])
             })
 
             describe("reduce", function() {
               it("determines the computed reduce value", function() {
                 try {
                   data.all.reduceCount()
-                  expect(data.all.value()).to.equal(43)
+                  expect(data.all.value()).toBe(43)
                 } finally {
                   data.all.reduceSum(function(d) { return d.total })
                 }
@@ -884,9 +764,8 @@ describe('DataManager', function(){
               assert.deepEqual(foos.top(1), [{key: -998, value: 8977.5}])
             })
         })
-    })
-})
-
+/* */
+console.log("All Ok.");
 function key(d) {
   return d.key;
 }

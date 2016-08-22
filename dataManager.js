@@ -1,1800 +1,3123 @@
-(function(exports){
-// This is for managing data to be used for graphing.
-// Uses crossfilter as storage and filter medium.
-
-function dataManager() {
-    var schema = {}
-      , filter = null
-      , filterFields = {}
-      , all = null
-      , sourceData = null
-      , total = 0
-      , NONE =  function(){return undefined}
-      , events = dataManager.dispatch('dataSet','dataChanged','schemaChanged','filterChanged','dimensionCreated','groupCreated')
-      , self = {
-            NONE: NONE
-          , on: function(){events.on.apply(events,Array.prototype.slice.call(arguments,0))}
-          , schema: function(_schema) {
-                // schema format:
-                // {
-                //     fieldName: { // arbitrary name used as accessor into filter/group functions.
-                //           type   : fieldTye  // Date/String/Number
-                //       , format : formatString // if field format (like a date) is necessary
-                //       , filter : function custom filter function. Or string of field to filter. 
-                //                  If this is null, it cannot be filtered.
-                //       , group  : {
-                //           type : string 'sum', 'count', 'custom'
-                //           field: string of field name or function to group by when maping in map/reduce
-                //           add:  // reduce "add" function.
-                //           sub:  // reduce "subtract" function
-                //           init: // init values for add/sub functions.
-                //         }
-                //     }
-                // }
-                if (!_schema) return schema;
-                var oldSchema = schema
-                schema = _schema
-                for (var f in schema) {
-                    if ('function' === typeof schema[f])
-                        schema[f] = {type:schema[f],filter:f,column:f}
-                    if (schema[f].filter === null) continue
-                    filterFields[f] = {
-                        dimension:null
-                      , column:(('function' === typeof schema[f].filter)?schema[f].column:schema[f].filter)||f
-                      , filter:('function' === typeof schema[f].filter)?schema[f].filter
-                            :((schema[f].filter!==null)?(function(n){
-                                 return function(d){
-                                   return d[n] 
-                                 }
-                               }
-                               )(schema[f].filter||f):null)
-                      , group: {} , data : self.NONE 
-                    }
-                }
-                events.schemaChanged(oldSchema,schema)
-                oldSchema = null
-                return self 
-            }
-          , setData: function (data, clearFilters) {
-                var i, f, column
-                // Process data to normalize into proper object types from JSON strings.
-                total = data.length
-                for (f in filterFields) {
-                    if (filterFields[f].dimension) {
-                        filterFields[f].dimension.filterAll()
-                        filterFields[f].dimension.remove()
-                    }
-                    if (clearFilters)
-                        filterFields[f].data = self.NONE
-                    filterFields[f].dimension=null
-                    filterFields[f].group = {}
-                    for (var g in (schema[f].group ||{}))
-                        if ('string' === typeof schema[f].group[g].map)
-                            schema[f].group[g].keyMap={}
-                }
-                for(i = 0;i<data.length;i++){
-                    for (f in schema) {
-                        column = filterFields[f]?filterFields[f].column:f
-                        if ('function' === typeof schema[f].type)
-                            schema[f].type.apply(this,[data[i],column])
-                        else if ((data[i][column]!==undefined)&&schema[f].type) {
-                            switch(schema[f].type.toLowerCase()) {
-                                case 'json':
-                                    data[i][column]=JSON.parse(data[i][column])
-                                break
-                                case 'integer':
-                                    data[i][column]=parseInt(data[i][column])
-                                break
-                                case 'float':
-                                    data[i][column]=parseFloat(data[i][column])
-                                break
-                                case 'date':
-                                    data[i][column]=new Date(data[i][column])
-                                break
-                            }
-                            for (var g in (schema[f].group||{}))
-                                if ('string' === typeof schema[f].group[g].map) {
-                                    schema[f].group[g].keyMap[data[i][column]]=data[i][schema[f].group[g].map]
-                                }
-                        }
-                    }
-                }
-                // Calling data changed here allows the data to be manipulated by the even handlers before crossfilter takes it.
-                events.dataSet(data)
-                filter = crossfilter(data)
-                all = filter.groupAll()
-                events.dataChanged(data)
-                // Handling processing filters set before data was set.
-                for (f in filterFields) {
-                    if (filterFields[f].data!=self.NONE) {
-                        i = filterFields[f].data
-                        filterFields[f].data = self.NONE
-                        self.filter.apply(self,[f].concat(i))
-                        i = null
-                    }
-                }
-                return self
-            }
-          , total: function() { return total }
-            // create dimension and filter (if data provided)
-            // Allows setting filters before data is applied.
-            // Filter field is column name. data can be one, more than one
-            //        or a filter function
-          , filter: function() {
-                var data = Array.prototype.slice.apply(arguments,[0])
-                  , field = data.shift() || null
-                if (!field) return filter // get the crossfilter
-                if (!filterFields[field]) throw "Field '"+field+"' is not defined in schema"
-                if (!filterFields[field].filter) throw "Field '"+field+"' is not defined to be able to filter in schema"
-                if (data.length) {
-                    if (!filterFields[field].dimension) {
-                        try {
-                            self.getDimension(field)
-                        } catch (e) {
-                            if (data[0]===self.NONE)
-                                filterFields[field].data = self.NONE
-                            else
-                                filterFields[field].data = data
-                            return
-                        }
-                    }
-                    if (data[0]===self.NONE)  {
-                        filterFields[field].dimension.filterAll()
-                        events.filterChanged({field:field,old:filterFields[field].data,new:data})
-                        filterFields[field].data = self.NONE
-                    } else
-                    if (data[0]===null)  {
-                        filterFields[field].dimension.filterExact(null)
-                        filterFields[field].data = [null]
-                    } else
-                    if (typeof(Function) === typeof(data[0]) || JSON.stringify(filterFields[field].data) != JSON.stringify(data)) {
-                        filterFields[field].dimension.filter.apply(filterFields[field].dimension,data)
-                        events.filterChanged({field:field,old:filterFields[field].data,new:data})
-                        filterFields[field].data = data
-                    }
-                } else //return filterFields[field]
-                       filterFields[field].dimension.filterAll()
-                return self
-            }
-          , getFilter: function(field) {
-                if (!field) throw "Must include a field to get filter"
-                if (!filterFields[field]) throw "Field '"+field+"' is not defined in schema"
-                if (!filterFields[field].filter) throw "Field '"+field+"' is not defined to be able to filter in schema"
-                return filterFields[field].data
-            }
-          , clearFilters: function() {
-                for (f in filterFields) {
-                    if (filterFields[f].filter)
-                        filterFields[f].data = self.NONE 
-                    if (filterFields[field].dimension)
-                        filterFields[field].dimension.filterAll()
-                }
-            }
-          , all: function(reset) { if (reset) all = DM.filter.groupAll();return all }
-          // return the group for the field filtered.
-          , group: function(field,group) {
-                if (!schema[field].group[group]) return null
-                if (!filterFields[field].dimension)
-                    self.getDimension(field) // make dimension.
-                var groupName = group
-                  , schemaGroup = schema[field].group[groupName]
-                if (!filterFields[field].group[group]) {
-                    if ('function' === typeof schemaGroup.map)
-                        group = filterFields[field].dimension.group(schemaGroup.map)
-                    else {
-                        group = filterFields[field].dimension.group()
-                        if ('string' === typeof schemaGroup.map)
-                            group.mapKey = function(d){
-                                return schemaGroup.keyMap[d]
-                            }
-                    }
-                    filterFields[field].group[groupName] = group
-                    if (!schemaGroup.reduce) schemaGroup.reduce = 'count'
-                    if (schemaGroup.order) group.order(schemaGroup.order)
-                    switch(schemaGroup.reduce) {
-                        case 'sum':
-                            if ('function' === typeof schemaGroup.sum)
-                                group.reduceSum(schemaGroup.sum)
-                            else
-                                group.reduceSum((function(f){return function(d){return d[f]}})(schemaGroup.sum))
-                        break
-                        case 'count':
-                            group.reduceCount()
-                        break
-                        case 'custom':
-                            group.reduce(
-                                schemaGroup.add||(function(f){return function(p,d){p.value+=d[f];return p}})(filterFields[field].column)
-                              , schemaGroup.sub||(function(f){return function(p,d){p.value-=d[f];return p}})(filterFields[field].column)
-                              , schemaGroup.init||function(){return {value:0}}
-                            )
-                        break
-                        //default:
-                        // Do the default
-                    }
-                    events.groupCreated({field:field,groupName:groupName,group:group,dimension:filterFields[field].dimension})
-                }
-                return filterFields[field].group[groupName]
-            }
-          , pivot: function(groups) {
-                return filter.pivotGroup(groups)
-            }
-          , getDimension: function(field) {
-                if (!filter) throw "Data has not been set. Cannot get a dimension"
-                if (!field) throw "A field name is required to get a dimension"
-                if (!filterFields[field]) throw "Field '"+field+"' is not a defined dimension"
-
-                if (!filterFields[field].dimension) {
-                    //filterFields[field].groupAll = filterFields[field].dimension.groupAll()
-                    //filterFields[field].filter = (function(f){return function(data){self.filter(f,data);return this}})(field)
-                    //filterFields[field].group = (function(f){return function(data){return self.group(f,data)}})(field)
-                    filterFields[field].dimension = filter.dimension(filterFields[field].filter)
-                    events.dimensionCreated(field,filterFields[field].dimension)
-                }
-                return filterFields[field].dimension
-            }
-        }
-    //end of variable declarations
-    return self
-}
-exports.dataManager = dataManager;
-(function(exports){
-crossfilter.version = "1.1.0";
-function crossfilter_identity(d) {
-  return d;
-}
-crossfilter.permute = permute;
-
-function permute(array, index) {
-  for (var i = 0, n = index.length, copy = new Array(n); i < n; ++i) {
-    copy[i] = array[index[i]];
-  }
-  return copy;
-}
-var bisect = crossfilter.bisect = bisect_by(crossfilter_identity);
-
-bisect.by = bisect_by;
-
-function bisect_by(f) {
-
-  // Locate the insertion point for x in a to maintain sorted order. The
-  // arguments lo and hi may be used to specify a subset of the array which
-  // should be considered; by default the entire array is used. If x is already
-  // present in a, the insertion point will be before (to the left of) any
-  // existing entries. The return value is suitable for use as the first
-  // argument to `array.splice` assuming that a is already sorted.
-  //
-  // The returned insertion point i partitions the array a into two halves so
-  // that all v < x for v in a[lo:i] for the left side and all v >= x for v in
-  // a[i:hi] for the right side.
-  function bisectLeft(a, x, lo, hi) {
-    while (lo < hi) {
-      var mid = lo + hi >> 1;
-      if (f(a[mid]) < x) lo = mid + 1;
-      else hi = mid;
-    }
-    return lo;
-  }
-
-  // Similar to bisectLeft, but returns an insertion point which comes after (to
-  // the right of) any existing entries of x in a.
-  //
-  // The returned insertion point i partitions the array into two halves so that
-  // all v <= x for v in a[lo:i] for the left side and all v > x for v in
-  // a[i:hi] for the right side.
-  function bisectRight(a, x, lo, hi) {
-    while (lo < hi) {
-      var mid = lo + hi >> 1;
-      if (x < f(a[mid])) hi = mid;
-      else lo = mid + 1;
-    }
-    return lo;
-  }
-
-  bisectRight.right = bisectRight;
-  bisectRight.left = bisectLeft;
-  return bisectRight;
-}
-var heap = crossfilter.heap = heap_by(crossfilter_identity);
-
-heap.by = heap_by;
-
-function heap_by(f) {
-
-  // Builds a binary heap within the specified array a[lo:hi]. The heap has the
-  // property such that the parent a[lo+i] is always less than or equal to its
-  // two children: a[lo+2*i+1] and a[lo+2*i+2].
-  function heap(a, lo, hi) {
-    var n = hi - lo,
-        i = (n >>> 1) + 1;
-    while (--i > 0) sift(a, i, n, lo);
-    return a;
-  }
-
-  // Sorts the specified array a[lo:hi] in descending order, assuming it is
-  // already a heap.
-  function sort(a, lo, hi) {
-    var n = hi - lo,
-        t;
-    while (--n > 0) t = a[lo], a[lo] = a[lo + n], a[lo + n] = t, sift(a, 1, n, lo);
-    return a;
-  }
-
-  // Sifts the element a[lo+i-1] down the heap, where the heap is the contiguous
-  // slice of array a[lo:lo+n]. This method can also be used to update the heap
-  // incrementally, without incurring the full cost of reconstructing the heap.
-  function sift(a, i, n, lo) {
-    var d = a[--lo + i],
-        x = f(d),
-        child;
-    while ((child = i << 1) <= n) {
-      if (child < n && f(a[lo + child]) > f(a[lo + child + 1])) child++;
-      if (x <= f(a[lo + child])) break;
-      a[lo + i] = a[lo + child];
-      i = child;
-    }
-    a[lo + i] = d;
-  }
-
-  heap.sort = sort;
-  return heap;
-}
-var heapselect = crossfilter.heapselect = heapselect_by(crossfilter_identity);
-
-heapselect.by = heapselect_by;
-
-function heapselect_by(f) {
-  var heap = heap_by(f);
-
-  // Returns a new array containing the top k elements in the array a[lo:hi].
-  // The returned array is not sorted, but maintains the heap property. If k is
-  // greater than hi - lo, then fewer than k elements will be returned. The
-  // order of elements in a is unchanged by this operation.
-  function heapselect(a, lo, hi, k) {
-    var queue = new Array(k = Math.min(hi - lo, k)),
-        min,
-        i,
-        x,
-        d;
-
-    for (i = 0; i < k; ++i) queue[i] = a[lo++];
-    heap(queue, 0, k);
-
-    if (lo < hi) {
-      min = f(queue[0]);
-      do {
-        if (x = f(d = a[lo]) > min) {
-          queue[0] = d;
-          min = f(heap(queue, 0, k)[0]);
-        }
-      } while (++lo < hi);
-    }
-
-    return queue;
-  }
-
-  return heapselect;
-}
-var insertionsort = crossfilter.insertionsort = insertionsort_by(crossfilter_identity);
-
-insertionsort.by = insertionsort_by;
-
-function insertionsort_by(f) {
-
-  function insertionsort(a, lo, hi) {
-    for (var i = lo + 1; i < hi; ++i) {
-      for (var j = i, t = a[i], x = f(t); j > lo && f(a[j - 1]) > x; --j) {
-        a[j] = a[j - 1];
-      }
-      a[j] = t;
-    }
-    return a;
-  }
-
-  return insertionsort;
-}
-// Algorithm designed by Vladimir Yaroslavskiy.
-// Implementation based on the Dart project; see lib/dart/LICENSE for details.
-
-var quicksort = crossfilter.quicksort = quicksort_by(crossfilter_identity);
-
-quicksort.by = quicksort_by;
-
-function quicksort_by(f) {
-  var insertionsort = insertionsort_by(f);
-
-  function sort(a, lo, hi) {
-    return (hi - lo < quicksort_sizeThreshold
-        ? insertionsort
-        : quicksort)(a, lo, hi);
-  }
-
-  function quicksort(a, lo, hi) {
-
-    // Compute the two pivots by looking at 5 elements.
-    var sixth = (hi - lo) / 6 | 0,
-        i1 = lo + sixth,
-        i5 = hi - 1 - sixth,
-        i3 = lo + hi - 1 >> 1,  // The midpoint.
-        i2 = i3 - sixth,
-        i4 = i3 + sixth;
-
-    var e1 = a[i1], x1 = f(e1),
-        e2 = a[i2], x2 = f(e2),
-        e3 = a[i3], x3 = f(e3),
-        e4 = a[i4], x4 = f(e4),
-        e5 = a[i5], x5 = f(e5);
-
-    var t;
-
-    // Sort the selected 5 elements using a sorting network.
-    if (x1 > x2) t = e1, e1 = e2, e2 = t, t = x1, x1 = x2, x2 = t;
-    if (x4 > x5) t = e4, e4 = e5, e5 = t, t = x4, x4 = x5, x5 = t;
-    if (x1 > x3) t = e1, e1 = e3, e3 = t, t = x1, x1 = x3, x3 = t;
-    if (x2 > x3) t = e2, e2 = e3, e3 = t, t = x2, x2 = x3, x3 = t;
-    if (x1 > x4) t = e1, e1 = e4, e4 = t, t = x1, x1 = x4, x4 = t;
-    if (x3 > x4) t = e3, e3 = e4, e4 = t, t = x3, x3 = x4, x4 = t;
-    if (x2 > x5) t = e2, e2 = e5, e5 = t, t = x2, x2 = x5, x5 = t;
-    if (x2 > x3) t = e2, e2 = e3, e3 = t, t = x2, x2 = x3, x3 = t;
-    if (x4 > x5) t = e4, e4 = e5, e5 = t, t = x4, x4 = x5, x5 = t;
-
-    var pivot1 = e2, pivotValue1 = x2,
-        pivot2 = e4, pivotValue2 = x4;
-
-    // e2 and e4 have been saved in the pivot variables. They will be written
-    // back, once the partitioning is finished.
-    a[i1] = e1;
-    a[i2] = a[lo];
-    a[i3] = e3;
-    a[i4] = a[hi - 1];
-    a[i5] = e5;
-
-    var less = lo + 1,   // First element in the middle partition.
-        great = hi - 2;  // Last element in the middle partition.
-
-    // Note that for value comparison, <, <=, >= and > coerce to a primitive via
-    // Object.prototype.valueOf; == and === do not, so in order to be consistent
-    // with natural order (such as for Date objects), we must do two compares.
-    var pivotsEqual = pivotValue1 <= pivotValue2 && pivotValue1 >= pivotValue2;
-    if (pivotsEqual) {
-
-      // Degenerated case where the partitioning becomes a dutch national flag
-      // problem.
-      //
-      // [ |  < pivot  | == pivot | unpartitioned | > pivot  | ]
-      //  ^             ^          ^             ^            ^
-      // left         less         k           great         right
-      //
-      // a[left] and a[right] are undefined and are filled after the
-      // partitioning.
-      //
-      // Invariants:
-      //   1) for x in ]left, less[ : x < pivot.
-      //   2) for x in [less, k[ : x == pivot.
-      //   3) for x in ]great, right[ : x > pivot.
-      for (var k = less; k <= great; ++k) {
-        var ek = a[k], xk = f(ek);
-        if (xk < pivotValue1) {
-          if (k !== less) {
-            a[k] = a[less];
-            a[less] = ek;
-          }
-          ++less;
-        } else if (xk > pivotValue1) {
-
-          // Find the first element <= pivot in the range [k - 1, great] and
-          // put [:ek:] there. We know that such an element must exist:
-          // When k == less, then el3 (which is equal to pivot) lies in the
-          // interval. Otherwise a[k - 1] == pivot and the search stops at k-1.
-          // Note that in the latter case invariant 2 will be violated for a
-          // short amount of time. The invariant will be restored when the
-          // pivots are put into their final positions.
-          while (true) {
-            var greatValue = f(a[great]);
-            if (greatValue > pivotValue1) {
-              great--;
-              // This is the only location in the while-loop where a new
-              // iteration is started.
-              continue;
-            } else if (greatValue < pivotValue1) {
-              // Triple exchange.
-              a[k] = a[less];
-              a[less++] = a[great];
-              a[great--] = ek;
-              break;
-            } else {
-              a[k] = a[great];
-              a[great--] = ek;
-              // Note: if great < k then we will exit the outer loop and fix
-              // invariant 2 (which we just violated).
-              break;
-            }
-          }
-        }
-      }
-    } else {
-
-      // We partition the list into three parts:
-      //  1. < pivot1
-      //  2. >= pivot1 && <= pivot2
-      //  3. > pivot2
-      //
-      // During the loop we have:
-      // [ | < pivot1 | >= pivot1 && <= pivot2 | unpartitioned  | > pivot2  | ]
-      //  ^            ^                        ^              ^             ^
-      // left         less                     k              great        right
-      //
-      // a[left] and a[right] are undefined and are filled after the
-      // partitioning.
-      //
-      // Invariants:
-      //   1. for x in ]left, less[ : x < pivot1
-      //   2. for x in [less, k[ : pivot1 <= x && x <= pivot2
-      //   3. for x in ]great, right[ : x > pivot2
-      for (var k = less; k <= great; k++) {
-        var ek = a[k], xk = f(ek);
-        if (xk < pivotValue1) {
-          if (k !== less) {
-            a[k] = a[less];
-            a[less] = ek;
-          }
-          ++less;
-        } else {
-          if (xk > pivotValue2) {
-            while (true) {
-              var greatValue = f(a[great]);
-              if (greatValue > pivotValue2) {
-                great--;
-                if (great < k) break;
-                // This is the only location inside the loop where a new
-                // iteration is started.
-                continue;
-              } else {
-                // a[great] <= pivot2.
-                if (greatValue < pivotValue1) {
-                  // Triple exchange.
-                  a[k] = a[less];
-                  a[less++] = a[great];
-                  a[great--] = ek;
-                } else {
-                  // a[great] >= pivot1.
-                  a[k] = a[great];
-                  a[great--] = ek;
-                }
-                break;
-              }
-            }
-          }
-        }
-      }
-    }
-
-    // Move pivots into their final positions.
-    // We shrunk the list from both sides (a[left] and a[right] have
-    // meaningless values in them) and now we move elements from the first
-    // and third partition into these locations so that we can store the
-    // pivots.
-    a[lo] = a[less - 1];
-    a[less - 1] = pivot1;
-    a[hi - 1] = a[great + 1];
-    a[great + 1] = pivot2;
-
-    // The list is now partitioned into three partitions:
-    // [ < pivot1   | >= pivot1 && <= pivot2   |  > pivot2   ]
-    //  ^            ^                        ^             ^
-    // left         less                     great        right
-
-    // Recursive descent. (Don't include the pivot values.)
-    sort(a, lo, less - 1);
-    sort(a, great + 2, hi);
-
-    if (pivotsEqual) {
-      // All elements in the second partition are equal to the pivot. No
-      // need to sort them.
-      return a;
-    }
-
-    // In theory it should be enough to call _doSort recursively on the second
-    // partition.
-    // The Android source however removes the pivot elements from the recursive
-    // call if the second partition is too large (more than 2/3 of the list).
-    if (less < i1 && great > i5) {
-      var lessValue, greatValue;
-      while ((lessValue = f(a[less])) <= pivotValue1 && lessValue >= pivotValue1) ++less;
-      while ((greatValue = f(a[great])) <= pivotValue2 && greatValue >= pivotValue2) --great;
-
-      // Copy paste of the previous 3-way partitioning with adaptions.
-      //
-      // We partition the list into three parts:
-      //  1. == pivot1
-      //  2. > pivot1 && < pivot2
-      //  3. == pivot2
-      //
-      // During the loop we have:
-      // [ == pivot1 | > pivot1 && < pivot2 | unpartitioned  | == pivot2 ]
-      //              ^                      ^              ^
-      //            less                     k              great
-      //
-      // Invariants:
-      //   1. for x in [ *, less[ : x == pivot1
-      //   2. for x in [less, k[ : pivot1 < x && x < pivot2
-      //   3. for x in ]great, * ] : x == pivot2
-      for (var k = less; k <= great; k++) {
-        var ek = a[k], xk = f(ek);
-        if (xk <= pivotValue1 && xk >= pivotValue1) {
-          if (k !== less) {
-            a[k] = a[less];
-            a[less] = ek;
-          }
-          less++;
-        } else {
-          if (xk <= pivotValue2 && xk >= pivotValue2) {
-            while (true) {
-              var greatValue = f(a[great]);
-              if (greatValue <= pivotValue2 && greatValue >= pivotValue2) {
-                great--;
-                if (great < k) break;
-                // This is the only location inside the loop where a new
-                // iteration is started.
-                continue;
-              } else {
-                // a[great] < pivot2.
-                if (greatValue < pivotValue1) {
-                  // Triple exchange.
-                  a[k] = a[less];
-                  a[less++] = a[great];
-                  a[great--] = ek;
-                } else {
-                  // a[great] == pivot1.
-                  a[k] = a[great];
-                  a[great--] = ek;
-                }
-                break;
-              }
-            }
-          }
-        }
-      }
-    }
-
-    // The second partition has now been cleared of pivot elements and looks
-    // as follows:
-    // [  *  |  > pivot1 && < pivot2  | * ]
-    //        ^                      ^
-    //       less                  great
-    // Sort the second partition using recursive descent.
-
-    // The second partition looks as follows:
-    // [  *  |  >= pivot1 && <= pivot2  | * ]
-    //        ^                        ^
-    //       less                    great
-    // Simply sort it by recursive descent.
-
-    return sort(a, less, great + 1);
-  }
-
-  return sort;
-}
-
-var quicksort_sizeThreshold = 32;
-var crossfilter_array8 = crossfilter_arrayUntyped,
-    crossfilter_array16 = crossfilter_arrayUntyped,
-    crossfilter_array32 = crossfilter_arrayUntyped,
-    crossfilter_arrayLengthen = crossfilter_identity,
-    crossfilter_arrayWiden = crossfilter_identity;
-
-if (typeof Uint8Array !== "undefined") {
-  crossfilter_array8 = function(n) { return new Uint8Array(n); };
-  crossfilter_array16 = function(n) { return new Uint16Array(n); };
-  crossfilter_array32 = function(n) { return new Uint32Array(n); };
-
-  crossfilter_arrayLengthen = function(array, length) {
-    var copy = new array.constructor(length);
-    copy.set(array);
-    return copy;
-  };
-
-  crossfilter_arrayWiden = function(array, width) {
-    var copy;
-    switch (width) {
-      case 16: copy = crossfilter_array16(array.length); break;
-      case 32: copy = crossfilter_array32(array.length); break;
-      default: throw new Error("invalid array width!");
-    }
-    copy.set(array);
-    return copy;
-  };
-}
-
-function crossfilter_arrayUntyped(n) {
-  return new Array(n);
-}
-function crossfilter_filterExact(bisect, value) {
-  return function(values) {
-    var n = values.length;
-    return [bisect.left(values, value, 0, n), bisect.right(values, value, 0, n)];
-  };
-}
-
-function crossfilter_filterRange(bisect, range) {
-  var min = range[0],
-      max = range[1];
-  return function(values) {
-    var n = values.length;
-    return [bisect.left(values, min, 0, n), bisect.left(values, max, 0, n)];
-  };
-}
-
-function crossfilter_filterAll(values) {
-  return [0, values.length];
-}
-function crossfilter_null() {
-  return null;
-}
-function crossfilter_zero() {
-  return 0;
-}
-function crossfilter_reduceIncrement(p) {
-  return p + 1;
-}
-
-function crossfilter_reduceDecrement(p) {
-  return p - 1;
-}
-
-function crossfilter_reduceAdd(f) {
-  return function(p, v) {
-    return p + +f(v);
-  };
-}
-
-function crossfilter_reduceSubtract(f) {
-  return function(p, v) {
-    return p - f(v);
-  };
-}
-exports.crossfilter = crossfilter;
-
-
-// Fowler/Noll/Vo hashing.  From https://github.com/jasondavies/bloomfilter.js, modified for arrays of integers
-function fnv_1a(v) {
-  var n = v.length,
-      a = 2166136261,
-      c,
-      d,
-      i = -1;
-  while (++i < n) {
-    c = v[i];
-    if (d = c & 0xff000000) {
-      a ^= d >> 24;
-      a += (a << 1) + (a << 4) + (a << 7) + (a << 8) + (a << 24);
-    }
-    if (d = c & 0xff0000) {
-      a ^= d >> 16;
-      a += (a << 1) + (a << 4) + (a << 7) + (a << 8) + (a << 24);
-    }
-    if (d = c & 0xff00) {
-      a ^= d >> 8;
-      a += (a << 1) + (a << 4) + (a << 7) + (a << 8) + (a << 24);
-    }
-    a ^= c & 0xff;
-    a += (a << 1) + (a << 4) + (a << 7) + (a << 8) + (a << 24);
-  }
-  // From http://home.comcast.net/~bretm/hash/6.html
-  a += a << 13;
-  a ^= a >> 7;
-  a += a << 3;
-  a ^= a >> 17;
-  a += a << 5;
-  return a & 0xffffffff;
-}
-
-// One additional iteration of FNV, given a hash.
-function fnv_1a_b(a) {
-  a += (a << 1) + (a << 4) + (a << 7) + (a << 8) + (a << 24);
-  a += a << 13;
-  a ^= a >> 7;
-  a += a << 3;
-  a ^= a >> 17;
-  a += a << 5;
-  return a & 0xffffffff;
-}
-
-
-
-function crossfilter() {
-  var crossfilter = {
-    add: add,
-    dimension: dimension,
-    pivotGroup: pivotGroup,
-    groupAll: groupAll,
-    size: size
-  };
-
-  var data = [], // the records
-      n = 0, // the number of records; data.length
-      m = 0, // number of dimensions in use
-      M = 8, // number of dimensions that can fit in `filters`
-      filters = crossfilter_array8(0), // M bits per record; 1 is filtered out
-      filterListeners = [], // when the filters change
-      dataListeners = [], // when data is added
-      positions = []; // for resetting dimension positions
-
-  // Adds the specified new records to this crossfilter.
-  function add(newData) {
-    var n0 = n,
-        n1 = newData.length;
-
-    // If there's actually new data to add…
-    // Merge the new data into the existing data.
-    // Lengthen the filter bitset to handle the new records.
-    // Notify listeners (dimensions and groups) that new data is available.
-    if (n1) {
-      data = data.concat(newData);
-      filters = crossfilter_arrayLengthen(filters, n += n1);
-      dataListeners.forEach(function(l) { l(newData, n0, n1); });
-    }
-
-    return crossfilter;
-  }
-
-  // Adds a new dimension with the specified value accessor function.
-  function dimension(value) {
-    var dimension = {
-      filter: filter,
-      filterExact: filterExact,
-      filterRange: filterRange,
-      filterAll: filterAll,
-      top: top,
-      bottom: bottom,
-      group: group,
-      groupAll: groupAll,
-      remove: remove
-    };
-
-    var position = m++,
-        one = 1 << position, // bit mask, e.g., 00001000
-        zero = ~one, // inverted one, e.g., 11110111
-        values, // sorted, cached array
-        index, // value rank ↦ object id
-        newValues, // temporary array storing newly-added values
-        newIndex, // temporary array storing newly-added index
-        sort = quicksort_by(function(i) { return newValues[i]; }),
-        refilter = crossfilter_filterAll, // for recomputing filter
-        indexListeners = [], // when data is added
-        lo0 = 0,
-        hi0 = 0,
-        union = false,
-        resetNeeded = false,
-        removeListeners = []; // track listeners for removal
-
-    // Updating a dimension is a two-stage process. First, we must update the
-    // associated filters for the newly-added records. Once all dimensions have
-    // updated their filters, the groups are notified to update.
-    dataListeners.unshift(preAdd);
-    dataListeners.push(postAdd);
-    removeListeners.push(preAdd);
-    removeListeners.push(postAdd);
-
-    // Incorporate any existing data into this dimension, and make sure that the
-    // filter bitset is wide enough to handle the new dimension.
-    if (m > M) filters = crossfilter_arrayWiden(filters, M <<= 1);
-    preAdd(data, 0, n);
-    postAdd(data, 0, n);
-
-    // Incorporates the specified new records into this dimension.
-    // This function is responsible for updating filters, values, and index.
-    function preAdd(newData, n0, n1) {
-
-      // Permute new values into natural order using a sorted index.
-      newValues = newData.map(value);
-      newIndex = sort(crossfilter_range(n1), 0, n1);
-      newValues = permute(newValues, newIndex);
-
-      // Bisect newValues to determine which new records are selected.
-      var bounds = refilter(newValues), lo1 = bounds[0], hi1 = bounds[1], i;
-      for (i = 0; i < lo1; ++i) filters[newIndex[i] + n0] |= one;
-      for (i = hi1; i < n1; ++i) filters[newIndex[i] + n0] |= one;
-
-      // If this dimension previously had no data, then we don't need to do the
-      // more expensive merge operation; use the new values and index as-is.
-      if (!n0) {
-        values = newValues;
-        index = newIndex;
-        lo0 = lo1;
-        hi0 = hi1;
-        return;
-      }
-
-      var oldValues = values,
-          oldIndex = index,
-          i0 = 0,
-          i1 = 0;
-
-      // Otherwise, create new arrays into which to merge new and old.
-      values = new Array(n);
-      index = crossfilter_index(n, n);
-
-      // Merge the old and new sorted values, and old and new index.
-      for (i = 0; i0 < n0 && i1 < n1; ++i) {
-        if (oldValues[i0] < newValues[i1]) {
-          values[i] = oldValues[i0];
-          index[i] = oldIndex[i0++];
-        } else {
-          values[i] = newValues[i1];
-          index[i] = newIndex[i1++] + n0;
-        }
-      }
-
-      // Add any remaining old values.
-      for (; i0 < n0; ++i0, ++i) {
-        values[i] = oldValues[i0];
-        index[i] = oldIndex[i0];
-      }
-
-      // Add any remaining new values.
-      for (; i1 < n1; ++i1, ++i) {
-        values[i] = newValues[i1];
-        index[i] = newIndex[i1] + n0;
-      }
-
-      // Bisect again to recompute lo0 and hi0.
-      bounds = refilter(values), lo0 = bounds[0], hi0 = bounds[1];
-    }
-
-    // When all filters have updated, notify index listeners of the new values.
-    function postAdd(newData, n0, n1) {
-      indexListeners.forEach(function(l) { l(newValues, newIndex, n0, n1); });
-      newValues = newIndex = null;
-    }
-
-    // Updates the selected values based on the specified bounds [lo, hi].
-    // This implementation is used by all the public filter methods.
-    function filterIndex(bounds) {
-      var i,
-          j,
-          k,
-          lo1 = bounds[0],
-          hi1 = bounds[1],
-          added = [],
-          removed = [],
-          reset = resetNeeded || union;
-
-      if (resetNeeded) {
-        for (i = 0; i < n; ++i) filters[index[i]] |= one;
-        lo0 = 0;
-        hi0 = 0;
-        resetNeeded = false;
-      }
-      if (union) {
-        for (i = lo1; i < hi1; ++i) filters[index[i]] &= zero;
-        if (lo0 > lo1) lo0 = lo1;
-        if (hi0 < hi1) hi0 = hi1;
-      } else {
-        // Fast incremental update based on previous lo index.
-        if (lo1 < lo0) {
-          for (i = lo1, j = Math.min(lo0, hi1); i < j; ++i) {
-            filters[k = index[i]] ^= one;
-            added.push(k);
-          }
-        } else if (lo1 > lo0) {
-          for (i = lo0, j = Math.min(lo1, hi0); i < j; ++i) {
-            filters[k = index[i]] ^= one;
-            removed.push(k);
-          }
-        }
-
-        // Fast incremental update based on previous hi index.
-        if (hi1 > hi0) {
-          for (i = Math.max(lo1, hi0), j = hi1; i < j; ++i) {
-            filters[k = index[i]] ^= one;
-            added.push(k);
-          }
-        } else if (hi1 < hi0) {
-          for (i = Math.max(lo0, hi1), j = hi0; i < j; ++i) {
-            filters[k = index[i]] ^= one;
-            removed.push(k);
-          }
-        }
-        lo0 = lo1;
-        hi0 = hi1;
-      }
-      filterListeners.forEach(function(l) { l(one, added, removed, reset); });
-      return dimension;
-    }
-
-    // Filters this dimension using the specified range, value, or null.
-    // If the range is null, this is equivalent to filterAll.
-    // If the range is an array, this is equivalent to filterRange.
-    // Otherwise, this is equivalent to filterExact.
-    // Multiple arguments are treated as a union operation.
-    function filter(range) {
-      if (arguments.length > 1) {
-        for (var i = 0, n = arguments.length; i < n; ++i) {
-          if (i === 1) union = true;
-          (Array.isArray(range = arguments[i]) ? filterRange : filterExact)(range);
-        }
-        union = false;
-        resetNeeded = true;
-        return dimension;
-      } else {
-        return range == null
-          ? filterAll() : Array.isArray(range)
-          ? filterRange(range) : typeof range === "function"
-          ? filterFunction(range)
-          : filterExact(range);
-      }
-    }
-
-    // Filters this dimension to select the exact value.
-    function filterExact(value) {
-      return filterIndex((refilter = crossfilter_filterExact(bisect, value))(values));
-    }
-
-    // Custom filter function.
-    function filterFunction(f) {
-      resetNeeded = true;
-      for (var i = 0; i < n; ++i) {
-        if (f(values[i], i)) filters[index[i]] &= zero;
-        else filters[index[i]] |= one;
-      }
-      lo0 = 0;
-      //lo1 = n;
-      filterListeners.forEach(function(l) { l(one, [], [], true); });
-      return dimension;
-    }
-
-    // Filters this dimension to select the specified range [lo, hi].
-    // The lower bound is inclusive, and the upper bound is exclusive.
-    function filterRange(range) {
-      return filterIndex((refilter = crossfilter_filterRange(bisect, range))(values));
-    }
-
-    // Clears any filters on this dimension.
-    function filterAll() {
-      return filterIndex((refilter = crossfilter_filterAll)(values));
-    }
-
-    // Returns the top K selected records based on this dimension's order.
-    // Note: observes this dimension's filter, unlike group and groupAll.
-    function top(k) {
-      var array = [],
-          i = hi0,
-          j;
-
-      while (--i >= lo0 && k > 0) {
-        if (!filters[j = index[i]]) {
-          array.push(data[j]);
-          --k;
-        }
-      }
-
-      return array;
-    }
-
-    // Returns the bottom K selected records based on this dimension's order.
-    // Note: observes this dimension's filter, unlike group and groupAll.
-    function bottom(k) {
-      var array = [],
-          i = lo0,
-          j;
-
-      while (i < hi0 && k > 0) {
-        if (!filters[j = index[i]]) {
-          array.push(data[j]);
-          --k;
-        }
-        i++;
-      }
-
-      return array;
-    }
-
-    // Adds a new group to this dimension, using the specified key function.
-    function group(key) {
-      var group = {
-        _groupIndex: _groupIndex,
-        top: top,
-        all: all,
-        reduce: reduce,
-        reduceCount: reduceCount,
-        reduceSum: reduceSum,
-        order: order,
-        orderNatural: orderNatural,
-        size: size
-      };
-
-      var groups, // array of {key, value}
-          groupIndex, // object id ↦ group id
-          groupWidth = 8,
-          groupCapacity = crossfilter_capacity(groupWidth),
-          k = 0, // cardinality
-          select,
-          heap,
-          reduceAdd,
-          reduceRemove,
-          reduceInitial,
-          update = crossfilter_null,
-          reset = crossfilter_null,
-          resetNeeded = true;
-
-      if (arguments.length < 1) key = crossfilter_identity;
-
-      // The group listens to the crossfilter for when any dimension changes, so
-      // that it can update the associated reduce values. It must also listen to
-      // the parent dimension for when data is added, and compute new keys.
-      filterListeners.push(update);
-      removeListeners.push(update);
-      indexListeners.push(add);
-
-      // Incorporate any existing data into the grouping.
-      add(values, index, 0, n);
-
-      // Incorporates the specified new values into this group.
-      // This function is responsible for updating groups and groupIndex.
-      function add(newValues, newIndex, n0, n1) {
-        var oldGroups = groups,
-            reIndex = crossfilter_index(k, groupCapacity),
-            add = reduceAdd,
-            initial = reduceInitial,
-            k0 = k, // old cardinality
-            i0 = 0, // index of old group
-            i1 = 0, // index of new record
-            j, // object id
-            g0, // old group
-            x0, // old key
-            x1, // new key
-            g, // group to add
-            x; // key of group to add
-
-        // If a reset is needed, we don't need to update the reduce values.
-        if (resetNeeded) add = initial = crossfilter_null;
-
-        // Reset the new groups (k is a lower bound).
-        // Also, make sure that groupIndex exists and is long enough.
-        groups = new Array(k), k = 0;
-        groupIndex = k0 > 1 ? crossfilter_arrayLengthen(groupIndex, n) : crossfilter_index(n, groupCapacity);
-
-        // Get the first old key (x0 of g0), if it exists.
-        if (k0) x0 = (g0 = oldGroups[0]).key;
-
-        // Find the first new key (x1), skipping NaN keys.
-        while (i1 < n1 && !((x1 = key(newValues[i1])) >= x1)) ++i1;
-
-        // While new keys remain…
-        while (i1 < n1) {
-
-          // Determine the lesser of the two current keys; new and old.
-          // If there are no old keys remaining, then always add the new key.
-          if (g0 && x0 <= x1) {
-            g = g0, x = x0;
-
-            // Record the new index of the old group.
-            reIndex[i0] = k;
-
-            // Retrieve the next old key.
-            if (g0 = oldGroups[++i0]) x0 = g0.key;
-          } else {
-            g = {key: x1, value: initial()}, x = x1;
-          }
-
-          // Add the lesser group.
-          groups[k] = g;
-
-          // Add any selected records belonging to the added group, while
-          // advancing the new key and populating the associated group index.
-          while (!(x1 > x)) {
-            groupIndex[j = newIndex[i1] + n0] = k;
-            if (!(filters[j] & zero)) g.value = add(g.value, data[j]);
-            if (++i1 >= n1) break;
-            x1 = key(newValues[i1]);
-          }
-
-          groupIncrement();
-        }
-
-        // Add any remaining old groups that were greater than all new keys.
-        // No incremental reduce is needed; these groups have no new records.
-        // Also record the new index of the old group.
-        while (i0 < k0) {
-          groups[reIndex[i0] = k] = oldGroups[i0++];
-          groupIncrement();
-        }
-
-        // If we added any new groups before any old groups,
-        // update the group index of all the old records.
-        if (k > i0) for (i0 = 0; i0 < n0; ++i0) {
-          groupIndex[i0] = reIndex[groupIndex[i0]];
-        }
-
-        // Modify the update and reset behavior based on the cardinality.
-        // If the cardinality is less than or equal to one, then the groupIndex
-        // is not needed. If the cardinality is zero, then there are no records
-        // and therefore no groups to update or reset. Note that we also must
-        // change the registered listener to point to the new method.
-        j = filterListeners.indexOf(update);
-        if (k > 1) {
-          update = updateMany;
-          reset = resetMany;
-        } else {
-          if (k === 1) {
-            update = updateOne;
-            reset = resetOne;
-          } else {
-            update = crossfilter_null;
-            reset = crossfilter_null;
-          }
-          groupIndex = null;
-        }
-        filterListeners[j] = update;
-        removeListeners.push(update);
-
-        // Count the number of added groups,
-        // and widen the group index as needed.
-        function groupIncrement() {
-          if (++k === groupCapacity) {
-            reIndex = crossfilter_arrayWiden(reIndex, groupWidth <<= 1);
-            groupIndex = crossfilter_arrayWiden(groupIndex, groupWidth);
-            groupCapacity = crossfilter_capacity(groupWidth);
-          }
-        }
-      }
-
-      // Reduces the specified selected or deselected records.
-      // This function is only used when the cardinality is greater than 1.
-      function updateMany(filterOne, added, removed, reset) {
-        if (filterOne === one || (resetNeeded = resetNeeded || reset)) return;
-
-        var i,
-            k,
-            n,
-            g;
-
-        // Add the added values.
-        for (i = 0, n = added.length; i < n; ++i) {
-          if (!(filters[k = added[i]] & zero)) {
-            g = groups[groupIndex[k]];
-            g.value = reduceAdd(g.value, data[k]);
-          }
-        }
-
-        // Remove the removed values.
-        for (i = 0, n = removed.length; i < n; ++i) {
-          if ((filters[k = removed[i]] & zero) === filterOne) {
-            g = groups[groupIndex[k]];
-            g.value = reduceRemove(g.value, data[k]);
-          }
-        }
-      }
-
-      // Reduces the specified selected or deselected records.
-      // This function is only used when the cardinality is 1.
-      function updateOne(filterOne, added, removed, reset) {
-        if (filterOne === one || (resetNeeded = resetNeeded || reset)) return;
-
-        var i,
-            k,
-            n,
-            g = groups[0];
-
-        // Add the added values.
-        for (i = 0, n = added.length; i < n; ++i) {
-          if (!(filters[k = added[i]] & zero)) {
-            g.value = reduceAdd(g.value, data[k]);
-          }
-        }
-
-        // Remove the removed values.
-        for (i = 0, n = removed.length; i < n; ++i) {
-          if ((filters[k = removed[i]] & zero) === filterOne) {
-            g.value = reduceRemove(g.value, data[k]);
-          }
-        }
-      }
-
-      // Recomputes the group reduce values from scratch.
-      // This function is only used when the cardinality is greater than 1.
-      function resetMany() {
-        var i,
-            g;
-
-        // Reset all group values.
-        for (i = 0; i < k; ++i) {
-          groups[i].value = reduceInitial();
-        }
-
-        // Add any selected records.
-        for (i = 0; i < n; ++i) {
-          if (!(filters[i] & zero)) {
-            g = groups[groupIndex[i]];
-            g.value = reduceAdd(g.value, data[i]);
-          }
-        }
-      }
-
-      // Recomputes the group reduce values from scratch.
-      // This function is only used when the cardinality is 1.
-      function resetOne() {
-        var i,
-            g = groups[0];
-
-        // Reset the singleton group values.
-        g.value = reduceInitial();
-
-        // Add any selected records.
-        for (i = 0; i < n; ++i) {
-          if (!(filters[i] & zero)) {
-            g.value = reduceAdd(g.value, data[i]);
-          }
-        }
-      }
-
-      // Returns the array of group values, in the dimension's natural order.
-      function all() {
-        if (resetNeeded) reset(), resetNeeded = false;
-        return groups;
-      }
-
-      function _groupIndex() {
-        if (resetNeeded) reset(), resetNeeded = false;
-        return groupIndex;
-      }
-
-      // Returns a new array containing the top K group values, in reduce order.
-      function top(k) {
-        var top = select(all(), 0, groups.length, k);
-        return heap.sort(top, 0, top.length);
-      }
-
-      // Sets the reduce behavior for this group to use the specified functions.
-      // This method lazily recomputes the reduce values, waiting until needed.
-      function reduce(add, remove, initial) {
-        reduceAdd = add;
-        reduceRemove = remove;
-        reduceInitial = initial;
-        resetNeeded = true;
-        return group;
-      }
-
-      // A convenience method for reducing by count.
-      function reduceCount() {
-        return reduce(crossfilter_reduceIncrement, crossfilter_reduceDecrement, crossfilter_zero);
-      }
-
-      // A convenience method for reducing by sum(value).
-      function reduceSum(value) {
-        return reduce(crossfilter_reduceAdd(value), crossfilter_reduceSubtract(value), crossfilter_zero);
-      }
-
-      // Sets the reduce order, using the specified accessor.
-      function order(value) {
-        select = heapselect_by(valueOf);
-        heap = heap_by(valueOf);
-        function valueOf(d) { return value(d.value); }
-        return group;
-      }
-
-      // A convenience method for natural ordering by reduce value.
-      function orderNatural() {
-        return order(crossfilter_identity);
-      }
-
-      // Returns the cardinality of this group, irrespective of any filters.
-      function size() {
-        return k;
-      }
-
-      return reduceCount().orderNatural();
-    }
-
-    // A convenience function for generating a singleton group.
-    function groupAll() {
-      var g = group(crossfilter_null), all = g.all;
-      delete g.all;
-      delete g.top;
-      delete g.order;
-      delete g.orderNatural;
-      delete g.size;
-      g.value = function() { return all()[0].value; };
-      return g;
-    }
-
-    // Remove this dimension.
-    function remove() {
-      filterAll();
-      var before = position ? -1 >>> 32 - position : 0, // mask for positions before this one
-          after = -1 << position, // mask for positions after this one
-          x,
-          removed = [];
-      for (var i = 0; i < n; i++) {
-        filters[i] = (x = filters[i]) & before | x >>> 1 & after;
-        removed[i] = i;
-      }
-      filterListeners.forEach(function(l) { l(one, [], removed); });
-      positions.splice(position, 1);
-      positions.slice(position).forEach(function(setPosition, i) {
-        setPosition(position + i);
-      });
-      removeListeners.forEach(function(l) {
-        var i = dataListeners.indexOf(l);
-        if (i >= 0) dataListeners.splice(i, 1);
-        i = filterListeners.indexOf(l);
-        if (i >= 0) filterListeners.splice(i, 1);
-      });
-      m--;
-      return dimension;
-    }
-
-    positions.push(function(i) {
-      one = 1 << (position = i);
-      zero = ~one;
-    });
-
-    return dimension;
-  }
-
-  // A convenience method for groupAll on a dummy dimension.
-  // This implementation can be optimized since it is always cardinality 1.
-  function groupAll() {
-    var group = {
-      reduce: reduce,
-      reduceCount: reduceCount,
-      reduceSum: reduceSum,
-      value: value
-    };
-
-    var reduceValue,
-        reduceAdd,
-        reduceRemove,
-        reduceInitial,
-        resetNeeded = true;
-
-    // The group listens to the crossfilter for when any dimension changes, so
-    // that it can update the reduce value. It must also listen to the parent
-    // dimension for when data is added.
-    filterListeners.push(update);
-    dataListeners.push(add);
-
-    // For consistency; actually a no-op since resetNeeded is true.
-    add(data, 0, n);
-
-    // Incorporates the specified new values into this group.
-    function add(newData, n0, n1) {
-      var i;
-
-      if (resetNeeded) return;
-
-      // Add the added values.
-      for (i = n0; i < n; ++i) {
-        if (!filters[i]) {
-          reduceValue = reduceAdd(reduceValue, data[i]);
-        }
-      }
-    }
-
-    // Reduces the specified selected or deselected records.
-    function update(filterOne, added, removed, reset) {
-      var i,
-          k,
-          n;
-
-      if (resetNeeded = resetNeeded || reset) return;
-
-      // Add the added values.
-      for (i = 0, n = added.length; i < n; ++i) {
-        if (!filters[k = added[i]]) {
-          reduceValue = reduceAdd(reduceValue, data[k]);
-        }
-      }
-
-      // Remove the removed values.
-      for (i = 0, n = removed.length; i < n; ++i) {
-        if (filters[k = removed[i]] === filterOne) {
-          reduceValue = reduceRemove(reduceValue, data[k]);
-        }
-      }
-    }
-
-    // Recomputes the group reduce value from scratch.
-    function reset() {
-      var i;
-
-      reduceValue = reduceInitial();
-
-      for (i = 0; i < n; ++i) {
-        if (!filters[i]) {
-          reduceValue = reduceAdd(reduceValue, data[i]);
-        }
-      }
-    }
-
-    // Sets the reduce behavior for this group to use the specified functions.
-    // This method lazily recomputes the reduce value, waiting until needed.
-    function reduce(add, remove, initial) {
-      reduceAdd = add;
-      reduceRemove = remove;
-      reduceInitial = initial;
-      resetNeeded = true;
-      return group;
-    }
-
-    // A convenience method for reducing by count.
-    function reduceCount() {
-      return reduce(crossfilter_reduceIncrement, crossfilter_reduceDecrement, crossfilter_zero);
-    }
-
-    // A convenience method for reducing by sum(value).
-    function reduceSum(value) {
-      return reduce(crossfilter_reduceAdd(value), crossfilter_reduceSubtract(value), crossfilter_zero);
-    }
-
-    // Returns the computed reduce value.
-    function value() {
-      if (resetNeeded) reset(), resetNeeded = false;
-      return reduceValue;
-    }
-
-    return reduceCount();
-  }
-
-  // Returns the number of records in this crossfilter, irrespective of any filters.
-  function size() {
-    return n;
-  }
-
-  function pivotGroup(groups) {
-    var pivotGroup = {
-      all: all,
-      size: size,
-      reduce: reduce,
-      reduceCount: reduceCount,
-      reduceSum: reduceSum
-    }
-
-    var pivotGroups, // array of {key, value}
-        pivotGroupIndex, // object id ↦ group id
-        k = 0, // cardinality
-        groupsLength = groups.length,
-        reduceAdd,
-        reduceRemove,
-        reduceInitial,
-        resetNeeded = true
-
-    filterListeners.push(update);
-
-    function pivotKeyEqual(lhs, rhs) {
-      var i, rslt = true
-      for(i=0; rslt && i<groupsLength; i++)
-        rslt = lhs[i] == rhs[i] 
-      return rslt
-    }
-
-    function pivotKeySort(lhs, rhs) {
-      var i, rslt = 0
-      for(i=0; !rslt && i<groupsLength; i++)
-        rslt = lhs[i] < rhs[i] ? -1 : lhs[i] > rhs[i] ? 1 : 0
-      return rslt
-    }
-
-    function reset() {
-      pivotGroups = []
-      pivotGroupIndex = []
-
-      function collectPivotGroupsAndIndexes() {
-        var i, j, hashProbe0, hashProbe, hashStep, key, 
-            groupIndexes = [],
-            bucketsLength = Math.max(Math.pow(2, Math.ceil(Math.log(n*1.5)/Math.log(2))), 256), // worst case 66% fill if every record is in a different bucket, but usually fill will be much lower
-            bucketsMask = bucketsLength-1,
-            buckets = new Array(bucketsLength)
-
-        for(i=0; i<groupsLength; i++) groupIndexes.push(groups[i]._groupIndex())
-
-        for(i=0; i<n; i++) {
-          key = []
-          for(j=0; j<groupsLength; j++) key.push(groupIndexes[j] ? groupIndexes[j][i] : 0)
-          hashProbe0 = -1
-          hashProbe = fnv_1a(key) & bucketsMask
-          hashStep = fnv_1a_b(hashProbe) 
-          hashProbe = hashProbe & bucketsMask
-          while(key && buckets[hashProbe]) {
-            if (pivotKeyEqual(pivotGroups[buckets[hashProbe]-1], key)) {
-              pivotGroupIndex.push(buckets[hashProbe]-1)
-              key = null
-            } else {
-              if (hashProbe0 == hashProbe) hashStep = 1 // prevent any chance of infinite loop due to hashStep not being relatively prime to bucketsLength
-              if (hashProbe0 == -1) hashProbe0 = hashProbe
-              hashProbe = (hashProbe + hashStep) & bucketsMask
-            }
-          }
-          if (key) {
-            buckets[hashProbe] = pivotGroups.length+1
-            pivotGroupIndex.push(pivotGroups.length)
-            pivotGroups.push(key)
-          }
-        }
-        k = pivotGroups.length
-      }
-
-      function sortPivotGroupsAndRemapIndexes() {
-        var i, pivotGroupIndexRemap = []
-        for(i=0; i<k; i++) pivotGroups[i].push(i)
-        pivotGroups.sort(pivotKeySort)
-        for(i=0; i<k; i++) pivotGroupIndexRemap[pivotGroups[i][groupsLength]] = i
-        for(i=0; i<n; i++) pivotGroupIndex[i] = pivotGroupIndexRemap[pivotGroupIndex[i]]
-      }
-
-      function constructPivotGroupObjects() {
-        var i, g, key, groupKeys = []
-        for(i=0; i<groupsLength; i++) groupKeys.push(groups[i].all())
-        for(i=0; i<k; i++) {
-          key = []
-          for(j=0; j<groupsLength; j++) key.push(groupKeys[j][pivotGroups[i][j]].key)
-          pivotGroups[i] = {key:key}
-        }
-      }
-
-      function resetPivotGroups() {
-        var i, g
-        for (i = 0; i < k; ++i) {
-          pivotGroups[i].value = reduceInitial()
-        }
-  
-        // Add any selected records.
-        for (i = 0; i < n; ++i) {
-          if (!filters[i]) {
-            g = pivotGroups[pivotGroupIndex[i]]
-            g.value = reduceAdd(g.value, data[i]);
-          }
-        }
-      }
-
-      collectPivotGroupsAndIndexes()
-      sortPivotGroupsAndRemapIndexes()
-      constructPivotGroupObjects()
-      resetPivotGroups()
-    }
-
-    function update(ignored, added, removed) {
-      if (resetNeeded) return
-
-      var i, k, n, g 
-
-      // Add the added values.
-      for (i = 0, n = added.length; i < n; ++i) {
-        if (!filters[k = added[i]]) {
-          g = pivotGroups[pivotGroupIndex[k]];
-          g.value = reduceAdd(g.value, data[k]);
-        }
-      }
-
-      // Remove the removed values.
-      for (i = 0, n = removed.length; i < n; ++i) {
-        if (filters[k = removed[i]]) {
-          g = pivotGroups[pivotGroupIndex[k]];
-          g.value = reduceRemove(g.value, data[k]);
-        }
-      }
-    }
-
-    function all() {
-      if (resetNeeded) reset(), resetNeeded = false;
-      return pivotGroups
-    }
-
-    function size() {
-      if (resetNeeded) reset(), resetNeeded = false;
-      return k
-    }
-
-    // Sets the reduce behavior for this group to use the specified functions.
-    // This method lazily recomputes the reduce values, waiting until needed.
-    function reduce(add, remove, initial) {
-      reduceAdd = add
-      reduceRemove = remove
-      reduceInitial = initial
-      resetNeeded = true
-      return pivotGroup
-    }
-
-    // A convenience method for reducing by count.
-    function reduceCount() {
-      return reduce(crossfilter_reduceIncrement, crossfilter_reduceDecrement, crossfilter_zero)
-    }
-
-    // A convenience method for reducing by sum(value).
-    function reduceSum(value) {
-      return reduce(crossfilter_reduceAdd(value), crossfilter_reduceSubtract(value), crossfilter_zero)
-    }
-
-    return reduceCount()
-  }
-
-  return arguments.length
-      ? add(arguments[0])
-      : crossfilter;
-}
-
-// Returns an array of size n, big enough to store ids up to m.
-function crossfilter_index(n, m) {
-  return (m < 0x101
-      ? crossfilter_array8 : m < 0x10001
-      ? crossfilter_array16
-      : crossfilter_array32)(n);
-}
-
-// Constructs a new array of size n, with sequential values from 0 to n - 1.
-function crossfilter_range(n) {
-  var range = crossfilter_index(n, n);
-  for (var i = -1; ++i < n;) range[i] = i;
-  return range;
-}
-
-function crossfilter_capacity(w) {
-  return w === 8
-      ? 0x100 : w === 16
-      ? 0x10000
-      : 0x100000000;
-}
-})(this);
-(function(scope) {
-scope.dispatch = function() {
-  var d = new dispatch,
-      i = -1,
-      n = arguments.length;
-  while (++i < n) d[arguments[i]] = dispatch_event(d);
-  return d;
-};
-
-function dispatch() {}
-
-dispatch.prototype.on = function(type, listener) {
-  var i = type.indexOf("."),
-      name = "";
-
-  // Extract optional namespace, e.g., "click.foo"
-  if (i > 0) {
-    name = type.substring(i + 1);
-    type = type.substring(0, i);
-  }
-
-  return arguments.length < 2
-      ? this[type].on(name)
-      : this[type].on(name, listener);
-};
-
-function dispatch_event(dispatch) {
-  var listeners = [],
-      listenerByName = {}
-
-  function event() {
-    var z = listeners, // defensive reference
-        i = -1,
-        n = z.length,
-        l;
-    while (++i < n) if (l = z[i].on) l.apply(this, arguments);
-    return dispatch;
-  }
-
-  event.on = function(name, listener) {
-    var l = listenerByName[name],
-        i;
-
-    // return the current listener, if any
-    if (arguments.length < 2) return l && l.on;
-
-    // remove the old listener, if any (with copy-on-write)
-    if (l) {
-      l.on = null;
-      listeners = listeners.slice(0, i = listeners.indexOf(l)).concat(listeners.slice(i + 1));
-      delete listenerByName[name];
-    }
-
-    // add the new listener, if any
-    if (listener) listeners.push({on: listener});
-
-    return dispatch;
-  };
-
-  return event;
-}
-})(dataManager)
-})(this);
+(function webpackUniversalModuleDefinition(root, factory) {
+	if(typeof exports === 'object' && typeof module === 'object')
+		module.exports = factory();
+	else if(typeof define === 'function' && define.amd)
+		define([], factory);
+	else {
+		var a = factory();
+		for(var i in a) (typeof exports === 'object' ? exports : root)[i] = a[i];
+	}
+})(this, function() {
+return /******/ (function(modules) { // webpackBootstrap
+/******/ 	// The module cache
+/******/ 	var installedModules = {};
+
+/******/ 	// The require function
+/******/ 	function __webpack_require__(moduleId) {
+
+/******/ 		// Check if module is in cache
+/******/ 		if(installedModules[moduleId])
+/******/ 			return installedModules[moduleId].exports;
+
+/******/ 		// Create a new module (and put it into the cache)
+/******/ 		var module = installedModules[moduleId] = {
+/******/ 			exports: {},
+/******/ 			id: moduleId,
+/******/ 			loaded: false
+/******/ 		};
+
+/******/ 		// Execute the module function
+/******/ 		modules[moduleId].call(module.exports, module, module.exports, __webpack_require__);
+
+/******/ 		// Flag the module as loaded
+/******/ 		module.loaded = true;
+
+/******/ 		// Return the exports of the module
+/******/ 		return module.exports;
+/******/ 	}
+
+
+/******/ 	// expose the modules object (__webpack_modules__)
+/******/ 	__webpack_require__.m = modules;
+
+/******/ 	// expose the module cache
+/******/ 	__webpack_require__.c = installedModules;
+
+/******/ 	// __webpack_public_path__
+/******/ 	__webpack_require__.p = "";
+
+/******/ 	// Load entry module and return exports
+/******/ 	return __webpack_require__(0);
+/******/ })
+/************************************************************************/
+/******/ ([
+/* 0 */
+/***/ function(module, exports, __webpack_require__) {
+
+	'use strict';
+
+	Object.defineProperty(exports, "__esModule", {
+	    value: true
+	});
+	exports.DataManager = undefined;
+
+	var _slicedToArray2 = __webpack_require__(52);
+
+	var _slicedToArray3 = _interopRequireDefault(_slicedToArray2);
+
+	var _defineProperty2 = __webpack_require__(50);
+
+	var _defineProperty3 = _interopRequireDefault(_defineProperty2);
+
+	var _extends4 = __webpack_require__(51);
+
+	var _extends5 = _interopRequireDefault(_extends4);
+
+	var _classCallCheck2 = __webpack_require__(48);
+
+	var _classCallCheck3 = _interopRequireDefault(_classCallCheck2);
+
+	var _createClass2 = __webpack_require__(49);
+
+	var _createClass3 = _interopRequireDefault(_createClass2);
+
+	var _regenerator = __webpack_require__(54);
+
+	var _regenerator2 = _interopRequireDefault(_regenerator);
+
+	var _typeof2 = __webpack_require__(53);
+
+	var _typeof3 = _interopRequireDefault(_typeof2);
+
+	var _changeEmitter = __webpack_require__(55);
+
+	function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+	var _marked = [entries].map(_regenerator2.default.mark); // import $$observable from 'symbol-observable';
+
+
+	// import 'babel-polyfill';
+	/**
+	 DataManager schema format:
+	{
+	    fieldName: { // arbitrary name used as accessor into filter/group functions.
+	          type   : fieldTye  // Date/String/Number
+	      , format : formatString // if field format (like a date) is necessary
+	      , filter : function custom filter function. Or string of field to filter. 
+	                 If this is null, it cannot be filtered.
+	      , group  : {
+	          type : string 'sum', 'count', 'custom'
+	          field: string of field name or function to group by when maping in map/reduce
+	          add:  // reduce "add" function.
+	          sub:  // reduce "subtract" function
+	          init: // init values for add/sub functions.
+	        }
+	    }
+	}
+	**/
+
+	// *Private* vars
+	var NONE = function NONE() {};
+	var funcType = typeof NONE === 'undefined' ? 'undefined' : (0, _typeof3.default)(NONE);
+	var pascalCase = function pascalCase(s) {
+	    return s[0].toUpperCase() + s.split('').slice(1).join('');
+	};
+	function entries(obj) {
+	    var _iteratorNormalCompletion, _didIteratorError, _iteratorError, _iterator, _step, key;
+
+	    return _regenerator2.default.wrap(function entries$(_context) {
+	        while (1) {
+	            switch (_context.prev = _context.next) {
+	                case 0:
+	                    _iteratorNormalCompletion = true;
+	                    _didIteratorError = false;
+	                    _iteratorError = undefined;
+	                    _context.prev = 3;
+	                    _iterator = Object.keys(obj)[Symbol.iterator]();
+
+	                case 5:
+	                    if (_iteratorNormalCompletion = (_step = _iterator.next()).done) {
+	                        _context.next = 12;
+	                        break;
+	                    }
+
+	                    key = _step.value;
+	                    _context.next = 9;
+	                    return [key, obj[key]];
+
+	                case 9:
+	                    _iteratorNormalCompletion = true;
+	                    _context.next = 5;
+	                    break;
+
+	                case 12:
+	                    _context.next = 18;
+	                    break;
+
+	                case 14:
+	                    _context.prev = 14;
+	                    _context.t0 = _context['catch'](3);
+	                    _didIteratorError = true;
+	                    _iteratorError = _context.t0;
+
+	                case 18:
+	                    _context.prev = 18;
+	                    _context.prev = 19;
+
+	                    if (!_iteratorNormalCompletion && _iterator.return) {
+	                        _iterator.return();
+	                    }
+
+	                case 21:
+	                    _context.prev = 21;
+
+	                    if (!_didIteratorError) {
+	                        _context.next = 24;
+	                        break;
+	                    }
+
+	                    throw _iteratorError;
+
+	                case 24:
+	                    return _context.finish(21);
+
+	                case 25:
+	                    return _context.finish(18);
+
+	                case 26:
+	                case 'end':
+	                    return _context.stop();
+	            }
+	        }
+	    }, _marked[0], this, [[3, 14, 18, 26], [19,, 21, 25]]);
+	}
+
+	var _schema2 = new WeakMap();
+
+	var _filter = new WeakMap();
+
+	var _filterFields = new WeakMap();
+
+	var _all = new WeakMap();
+
+	var _sourceData = new WeakMap();
+
+	var _total = new WeakMap();
+
+	var _isCSV = new WeakMap();
+
+	var _hasHeading = new WeakMap();
+
+	var _headings = new WeakMap();
+
+	var _crossfilter = new WeakMap();
+
+	var _events = new WeakMap();
+
+	var DataManager = function () {
+	    // Original Source data.
+	    // List of fields to filter
+	    // Current schema
+	    function DataManager(crossfilter) {
+	        (0, _classCallCheck3.default)(this, DataManager);
+
+	        _schema2.set(this, null);
+
+	        _filter.set(this, null);
+
+	        _filterFields.set(this, {});
+
+	        _all.set(this, null);
+
+	        _sourceData.set(this, null);
+
+	        _total.set(this, 0);
+
+	        _isCSV.set(this, false);
+
+	        _hasHeading.set(this, false);
+
+	        _headings.set(this, null);
+
+	        _events.set(this, ['dataSet', 'dataChanged', 'schemaChanged', 'filterChanged', 'dimensionCreated', 'groupCreated'].reduce(function (all, ev) {
+	            return (0, _extends5.default)({}, all, (0, _defineProperty3.default)({}, ev, (0, _changeEmitter.createChangeEmitter)()));
+	        }, {}));
+
+	        var _iteratorNormalCompletion2 = true;
+	        var _didIteratorError2 = false;
+	        var _iteratorError2 = undefined;
+
+	        try {
+	            for (var _iterator2 = Object.keys(_events.get(this))[Symbol.iterator](), _step2; !(_iteratorNormalCompletion2 = (_step2 = _iterator2.next()).done); _iteratorNormalCompletion2 = true) {
+	                var e = _step2.value;
+	                this['on' + pascalCase(e)] = _events.get(this)[e].listen;
+	            }
+	        } catch (err) {
+	            _didIteratorError2 = true;
+	            _iteratorError2 = err;
+	        } finally {
+	            try {
+	                if (!_iteratorNormalCompletion2 && _iterator2.return) {
+	                    _iterator2.return();
+	                }
+	            } finally {
+	                if (_didIteratorError2) {
+	                    throw _iteratorError2;
+	                }
+	            }
+	        }
+
+	        _crossfilter.set(this, crossfilter);
+
+	        this.NONE = NONE;
+	    } // Crossfilter instance
+	    // Total count
+	    // Result of asking for all data.
+	    // Current filter (processed through CF)
+
+
+	    (0, _createClass3.default)(DataManager, [{
+	        key: 'schema',
+	        value: function schema(newSchema) {
+	            // schema format:
+	            // {
+	            //     fieldName: { // arbitrary name used as accessor into filter/group functions.
+	            //           type   : fieldTye  // Date/String/Number
+	            //       , format : formatString // if field format (like a date) is necessary
+	            //       , filter : function custom filter function. Or string of field to filter. 
+	            //                  If this is null, it cannot be filtered.
+	            //       , group  : {
+	            //           type : string 'sum', 'count', 'custom'
+	            //           field: string of field name or function to group by when maping in map/reduce
+	            //           add:  // reduce "add" function.
+	            //           sub:  // reduce "subtract" function
+	            //           init: // init values for add/sub functions.
+	            //         }
+	            //     }
+	            // }
+	            if (!newSchema) return _schema2.get(this);
+	            var oldSchema = _schema2.get(this);
+
+	            _schema2.set(this, newSchema);
+
+	            for (var f in newSchema) {
+	                if ('function' === typeof newSchema[f]) newSchema[f] = { type: newSchema[f], filter: f, column: f };
+	                if (newSchema[f].filter === null) continue;
+	                _filterFields.get(this)[f] = {
+	                    dimension: null,
+	                    column: ('function' === typeof newSchema[f].filter ? newSchema[f].column : newSchema[f].filter) || f,
+	                    filter: 'function' === typeof newSchema[f].filter ? newSchema[f].filter : newSchema[f].filter !== null ? function (n) {
+	                        return function (d) {
+	                            return d[n];
+	                        };
+	                    }(newSchema[f].filter || f) : null,
+	                    group: {}, data: NONE
+	                };
+	            }
+	            _events.get(this).schemaChanged.emit(oldSchema, newSchema);
+	            oldSchema = null;
+	            return this;
+	        }
+	        // If the data is in CSV format, and doesn't have headings, you can set them here.
+
+	    }, {
+	        key: 'setHeadings',
+	        value: function setHeadings(heading) {
+	            _headings.set(this, heading);
+
+	            _hasHeading.set(this, false); // set that the data has headings to false.
+
+	        }
+	    }, {
+	        key: 'hasHeading',
+	        value: function hasHeading(yes) {
+	            _hasHeading.set(this, yes);
+	        }
+	    }, {
+	        key: 'setData',
+	        value: function setData(data, clearFilters) {
+	            var column;
+	            // Process data to normalize into proper object types from JSON strings.
+
+	            _total.set(this, data.length);
+	            // Clear filters
+
+
+	            for (var _f in _filterFields.get(this)) {
+	                clearFilters();
+	                // if (this._filterFields[f].dimension) {
+	                //     this._filterFields[f].dimension.filterAll();
+	                //     this._filterFields[f].dimension.remove();
+	                // }
+	                // if (clearFilters)
+	                //     this._filterFields[f].data = NONE;
+	                _filterFields.get(this)[_f].dimension = null;
+	                _filterFields.get(this)[_f].group = {};
+	                var _iteratorNormalCompletion3 = true;
+	                var _didIteratorError3 = false;
+	                var _iteratorError3 = undefined;
+
+	                try {
+	                    for (var _iterator3 = entries(_schema2.get(this)[_f].group)[Symbol.iterator](), _step3; !(_iteratorNormalCompletion3 = (_step3 = _iterator3.next()).done); _iteratorNormalCompletion3 = true) {
+	                        var _step3$value = (0, _slicedToArray3.default)(_step3.value, 2);
+
+	                        var key = _step3$value[0];
+	                        var value = _step3$value[1];
+
+	                        if ('string' === typeof value.map) value.keyMap = {};
+	                    }
+	                } catch (err) {
+	                    _didIteratorError3 = true;
+	                    _iteratorError3 = err;
+	                } finally {
+	                    try {
+	                        if (!_iteratorNormalCompletion3 && _iterator3.return) {
+	                            _iterator3.return();
+	                        }
+	                    } finally {
+	                        if (_didIteratorError3) {
+	                            throw _iteratorError3;
+	                        }
+	                    }
+	                }
+	            }
+	            var headings = this._heading;
+	            if (_isCSV.get(this)) {
+	                if (_hasHeading.get(this)) {
+	                    headings = data.shift().reduce(function (all, field, i) {
+	                        return (0, _extends5.default)({}, all, (0, _defineProperty3.default)({}, field, i));
+	                    }, {});
+	                }
+	            }
+	            // Iterate through each data line
+	            for (var i = 0; i < data.length; i++) {
+	                var _schema = _schema2.get(this);
+	                // Iterate through each field.
+	                for (f in _schema) {
+	                    var _column = _filterFields.get(this)[f] ? _filterFields.get(this)[f].column : f;
+	                    if ('function' === typeof _schema2.get(this)[f].type) _schema2.get(this)[f].type.apply(this, [data[i], _column]);else {
+	                        if (_isCSV.get(this)) _column = _headings.get(this)[_column];
+	                        if (data[i][_column] !== undefined && _schema2.get(this)[f].type) {
+	                            switch (_schema2.get(this)[f].type.toLowerCase()) {
+	                                case 'json':
+	                                    data[i][_column] = JSON.parse(data[i][_column]);
+	                                    break;
+	                                case 'integer':
+	                                    data[i][_column] = parseInt(data[i][_column]);
+	                                    break;
+	                                case 'float':
+	                                    data[i][_column] = parseFloat(data[i][_column]);
+	                                    break;
+	                                case 'date':
+	                                    data[i][_column] = new Date(data[i][_column]);
+	                                    break;
+	                            }
+	                            var _iteratorNormalCompletion4 = true;
+	                            var _didIteratorError4 = false;
+	                            var _iteratorError4 = undefined;
+
+	                            try {
+	                                for (var _iterator4 = entries(_schema2.get(this)[f].group)[Symbol.iterator](), _step4; !(_iteratorNormalCompletion4 = (_step4 = _iterator4.next()).done); _iteratorNormalCompletion4 = true) {
+	                                    var _step4$value = (0, _slicedToArray3.default)(_step4.value, 2);
+
+	                                    var key = _step4$value[0];
+	                                    var value = _step4$value[1];
+
+	                                    if ('string' === typeof value.map) value.keyMap[data[i][_column]] = data[i][value.map];
+	                                }
+	                            } catch (err) {
+	                                _didIteratorError4 = true;
+	                                _iteratorError4 = err;
+	                            } finally {
+	                                try {
+	                                    if (!_iteratorNormalCompletion4 && _iterator4.return) {
+	                                        _iterator4.return();
+	                                    }
+	                                } finally {
+	                                    if (_didIteratorError4) {
+	                                        throw _iteratorError4;
+	                                    }
+	                                }
+	                            }
+	                        }
+	                    }
+	                }
+	            }
+	            // Calling data changed here allows the data to be manipulated by the event handlers before crossfilter takes it.
+	            _events.get(this).dataSet.emit(data);
+
+	            _filter.set(this, _crossfilter.get(this)(data));
+
+	            _all.set(this, _filter.get(this).groupAll());
+
+	            _events.get(this).dataChanged.emit(data);
+	            // Handling processing filters set before data was set.
+	            for (var _f2 in _filterFields.get(this)) {
+	                if (_filterFields.get(this)[_f2].data != NONE) {
+	                    _filterFields.get(this)[_f2].data = NONE;
+	                    this.filter.apply(this, [_f2].concat(_filterFields.get(this)[_f2].data));
+	                }
+	            }
+	            return this;
+	        }
+	    }, {
+	        key: 'filter',
+	        value: function filter() {
+	            for (var _len = arguments.length, data = Array(_len), _key = 0; _key < _len; _key++) {
+	                data[_key] = arguments[_key];
+	            }
+
+	            var field = data.shift() || null;
+	            if (!field) return _filter.get(this); // get the crossfilter
+	            if (!_filterFields.get(this)[field]) throw "Field '" + field + "' is not defined in schema";
+	            if (!_filterFields.get(this)[field].filter) throw "Field '" + field + "' is not defined to be able to filter in schema";
+	            if (data.length) {
+	                if (!_filterFields.get(this)[field].dimension) {
+	                    try {
+	                        this.getDimension(field);
+	                    } catch (e) {
+	                        if (data[0] === NONE) _filterFields.get(this)[field].data = NONE;else _filterFields.get(this)[field].data = data;
+	                        return;
+	                    }
+	                }
+	                if (data[0] === NONE) {
+	                    _filterFields.get(this)[field].dimension.filterAll();
+	                    _events.get(this).filterChanged.emit({ field: field, old: _filterFields.get(this)[field].data, new: data });
+	                    _filterFields.get(this)[field].data = NONE;
+	                } else if (data[0] === null) {
+	                    _filterFields.get(this)[field].dimension.filterExact(null);
+	                    _filterFields.get(this)[field].data = [null];
+	                } else if ((typeof Function === 'undefined' ? 'undefined' : (0, _typeof3.default)(Function)) === (0, _typeof3.default)(data[0]) || JSON.stringify(_filterFields.get(this)[field].data) != JSON.stringify(data)) {
+	                    _filterFields.get(this)[field].dimension.filter.apply(_filterFields.get(this)[field].dimension, data);
+	                    _events.get(this).filterChanged.emit({ field: field, old: _filterFields.get(this)[field].data, new: data });
+	                    _filterFields.get(this)[field].data = data;
+	                }
+	            } else //return filterFields[field]
+	                _filterFields.get(this)[field].dimension.filterAll();
+	            return this;
+	        }
+	    }, {
+	        key: 'getFilter',
+	        value: function getFilter(field) {
+	            if (!field) throw "Must include a field to get filter";
+	            if (!_filterFields.get(this)[field]) throw "Field '" + field + "' is not defined in schema";
+	            if (!_filterFields.get(this)[field].filter) throw "Field '" + field + "' is not defined to be able to filter in schema";
+	            return _filterFields.get(this)[field].data;
+	        }
+	    }, {
+	        key: 'clearFilters',
+	        value: function clearFilters() {
+	            for (f in _filterFields.get(this)) {
+	                if (_filterFields.get(this)[f].filter) _filterFields.get(this)[f].data = NONE;
+	                if (_filterFields.get(this)[field].dimension) _filterFields.get(this)[field].dimension.filterAll();
+	            }
+	        }
+	    }, {
+	        key: 'all',
+	        value: function all(reset) {
+	            if (reset) _all.set(this, _filter.get(this).groupAll());return _all.get(this);
+	        }
+	        // return the group for the field filtered.
+
+	    }, {
+	        key: 'group',
+	        value: function group(field, _group) {
+	            if (!_schema2.get(this)[field].group[_group]) return null;
+	            if (!this.filterFields[field].dimension) this.getDimension(field); // make dimension.
+	            var groupName = _group,
+	                schemaGroup = _schema2.get(this)[field].group[groupName];
+	            if (!_filterFields.get(this)[field].group[_group]) {
+	                if ('function' === typeof schemaGroup.map) _group = _filterFields.get(this)[field].dimension.group(schemaGroup.map);else {
+	                    _group = _filterFields.get(this)[field].dimension.group();
+	                    if ('string' === typeof schemaGroup.map) _group.mapKey = function (d) {
+	                        return schemaGroup.keyMap[d];
+	                    };
+	                }
+	                _filterFields.get(this)[field].group[groupName] = _group;
+	                if (!schemaGroup.reduce) schemaGroup.reduce = 'count';
+	                if (schemaGroup.order) _group.order(schemaGroup.order);
+	                switch (schemaGroup.reduce) {
+	                    case 'sum':
+	                        if ('function' === typeof schemaGroup.sum) _group.reduceSum(schemaGroup.sum);else _group.reduceSum(function (f) {
+	                            return function (d) {
+	                                return d[f];
+	                            };
+	                        }(schemaGroup.sum));
+	                        break;
+	                    case 'count':
+	                        _group.reduceCount();
+	                        break;
+	                    case 'custom':
+	                        _group.reduce(schemaGroup.add || function (f) {
+	                            return function (p, d) {
+	                                p.value += d[f];return p;
+	                            };
+	                        }(_filterFields.get(this)[field].column), schemaGroup.sub || function (f) {
+	                            return function (p, d) {
+	                                p.value -= d[f];return p;
+	                            };
+	                        }(_filterFields.get(this)[field].column), schemaGroup.init || function () {
+	                            return { value: 0 };
+	                        });
+	                        break;
+	                    //default:
+	                    // Do the default
+	                }
+	                _events.get(this).groupCreated.emit({ field: field, groupName: groupName, group: _group, dimension: _filterFields.get(this)[field].dimension });
+	            }
+	            return _filterFields.get(this)[field].group[groupName];
+	        }
+	    }, {
+	        key: 'pivot',
+	        value: function pivot(groups) {
+	            return _filter.get(this).pivotGroup(groups);
+	        }
+	    }, {
+	        key: 'getDimension',
+	        value: function getDimension(field) {
+	            if (!field) throw "A field name is required to get a dimension";
+	            if (!_filter.get(this)) throw "Data has not been set. Cannot get a dimension";
+	            if (!_filterFields.get(this)[field]) throw "Field '" + field + "' is not a defined dimension";
+
+	            if (!_filterFields.get(this)[field].dimension) {
+	                //this._filterFields[field].groupAll = filterFields[field].dimension.groupAll()
+	                //this._filterFields[field].filter = (function(f){return function(data){self.filter(f,data);return this}})(field)
+	                //this._filterFields[field].group = (function(f){return function(data){return self.group(f,data)}})(field)
+	                _filterFields.get(this)[field].dimension = _filter.get(this).dimension(_filterFields.get(this)[field].filter);
+	                _events.get(this).dimensionCreated.emit(field, _filterFields.get(this)[field].dimension);
+	            }
+	            return _filterFields.get(this)[field].dimension;
+	        }
+	    }]);
+	    return DataManager;
+	}();
+
+	exports.default = DataManager;
+	exports.DataManager = DataManager;
+
+/***/ },
+/* 1 */
+/***/ function(module, exports, __webpack_require__) {
+
+	var store      = __webpack_require__(25)('wks')
+	  , uid        = __webpack_require__(17)
+	  , Symbol     = __webpack_require__(3).Symbol
+	  , USE_SYMBOL = typeof Symbol == 'function';
+
+	var $exports = module.exports = function(name){
+	  return store[name] || (store[name] =
+	    USE_SYMBOL && Symbol[name] || (USE_SYMBOL ? Symbol : uid)('Symbol.' + name));
+	};
+
+	$exports.store = store;
+
+/***/ },
+/* 2 */
+/***/ function(module, exports) {
+
+	var core = module.exports = {version: '2.4.0'};
+	if(typeof __e == 'number')__e = core; // eslint-disable-line no-undef
+
+/***/ },
+/* 3 */
+/***/ function(module, exports) {
+
+	// https://github.com/zloirock/core-js/issues/86#issuecomment-115759028
+	var global = module.exports = typeof window != 'undefined' && window.Math == Math
+	  ? window : typeof self != 'undefined' && self.Math == Math ? self : Function('return this')();
+	if(typeof __g == 'number')__g = global; // eslint-disable-line no-undef
+
+/***/ },
+/* 4 */
+/***/ function(module, exports, __webpack_require__) {
+
+	// Thank's IE8 for his funny defineProperty
+	module.exports = !__webpack_require__(10)(function(){
+	  return Object.defineProperty({}, 'a', {get: function(){ return 7; }}).a != 7;
+	});
+
+/***/ },
+/* 5 */
+/***/ function(module, exports) {
+
+	var hasOwnProperty = {}.hasOwnProperty;
+	module.exports = function(it, key){
+	  return hasOwnProperty.call(it, key);
+	};
+
+/***/ },
+/* 6 */
+/***/ function(module, exports, __webpack_require__) {
+
+	var anObject       = __webpack_require__(9)
+	  , IE8_DOM_DEFINE = __webpack_require__(35)
+	  , toPrimitive    = __webpack_require__(27)
+	  , dP             = Object.defineProperty;
+
+	exports.f = __webpack_require__(4) ? Object.defineProperty : function defineProperty(O, P, Attributes){
+	  anObject(O);
+	  P = toPrimitive(P, true);
+	  anObject(Attributes);
+	  if(IE8_DOM_DEFINE)try {
+	    return dP(O, P, Attributes);
+	  } catch(e){ /* empty */ }
+	  if('get' in Attributes || 'set' in Attributes)throw TypeError('Accessors not supported!');
+	  if('value' in Attributes)O[P] = Attributes.value;
+	  return O;
+	};
+
+/***/ },
+/* 7 */
+/***/ function(module, exports, __webpack_require__) {
+
+	// to indexed object, toObject with fallback for non-array-like ES3 strings
+	var IObject = __webpack_require__(36)
+	  , defined = __webpack_require__(19);
+	module.exports = function(it){
+	  return IObject(defined(it));
+	};
+
+/***/ },
+/* 8 */
+/***/ function(module, exports, __webpack_require__) {
+
+	var dP         = __webpack_require__(6)
+	  , createDesc = __webpack_require__(16);
+	module.exports = __webpack_require__(4) ? function(object, key, value){
+	  return dP.f(object, key, createDesc(1, value));
+	} : function(object, key, value){
+	  object[key] = value;
+	  return object;
+	};
+
+/***/ },
+/* 9 */
+/***/ function(module, exports, __webpack_require__) {
+
+	var isObject = __webpack_require__(14);
+	module.exports = function(it){
+	  if(!isObject(it))throw TypeError(it + ' is not an object!');
+	  return it;
+	};
+
+/***/ },
+/* 10 */
+/***/ function(module, exports) {
+
+	module.exports = function(exec){
+	  try {
+	    return !!exec();
+	  } catch(e){
+	    return true;
+	  }
+	};
+
+/***/ },
+/* 11 */
+/***/ function(module, exports) {
+
+	module.exports = {};
+
+/***/ },
+/* 12 */
+/***/ function(module, exports, __webpack_require__) {
+
+	// 19.1.2.14 / 15.2.3.14 Object.keys(O)
+	var $keys       = __webpack_require__(40)
+	  , enumBugKeys = __webpack_require__(20);
+
+	module.exports = Object.keys || function keys(O){
+	  return $keys(O, enumBugKeys);
+	};
+
+/***/ },
+/* 13 */
+/***/ function(module, exports, __webpack_require__) {
+
+	var global    = __webpack_require__(3)
+	  , core      = __webpack_require__(2)
+	  , ctx       = __webpack_require__(65)
+	  , hide      = __webpack_require__(8)
+	  , PROTOTYPE = 'prototype';
+
+	var $export = function(type, name, source){
+	  var IS_FORCED = type & $export.F
+	    , IS_GLOBAL = type & $export.G
+	    , IS_STATIC = type & $export.S
+	    , IS_PROTO  = type & $export.P
+	    , IS_BIND   = type & $export.B
+	    , IS_WRAP   = type & $export.W
+	    , exports   = IS_GLOBAL ? core : core[name] || (core[name] = {})
+	    , expProto  = exports[PROTOTYPE]
+	    , target    = IS_GLOBAL ? global : IS_STATIC ? global[name] : (global[name] || {})[PROTOTYPE]
+	    , key, own, out;
+	  if(IS_GLOBAL)source = name;
+	  for(key in source){
+	    // contains in native
+	    own = !IS_FORCED && target && target[key] !== undefined;
+	    if(own && key in exports)continue;
+	    // export native or passed
+	    out = own ? target[key] : source[key];
+	    // prevent global pollution for namespaces
+	    exports[key] = IS_GLOBAL && typeof target[key] != 'function' ? source[key]
+	    // bind timers to global for call from export context
+	    : IS_BIND && own ? ctx(out, global)
+	    // wrap global constructors for prevent change them in library
+	    : IS_WRAP && target[key] == out ? (function(C){
+	      var F = function(a, b, c){
+	        if(this instanceof C){
+	          switch(arguments.length){
+	            case 0: return new C;
+	            case 1: return new C(a);
+	            case 2: return new C(a, b);
+	          } return new C(a, b, c);
+	        } return C.apply(this, arguments);
+	      };
+	      F[PROTOTYPE] = C[PROTOTYPE];
+	      return F;
+	    // make static versions for prototype methods
+	    })(out) : IS_PROTO && typeof out == 'function' ? ctx(Function.call, out) : out;
+	    // export proto methods to core.%CONSTRUCTOR%.methods.%NAME%
+	    if(IS_PROTO){
+	      (exports.virtual || (exports.virtual = {}))[key] = out;
+	      // export proto methods to core.%CONSTRUCTOR%.prototype.%NAME%
+	      if(type & $export.R && expProto && !expProto[key])hide(expProto, key, out);
+	    }
+	  }
+	};
+	// type bitmap
+	$export.F = 1;   // forced
+	$export.G = 2;   // global
+	$export.S = 4;   // static
+	$export.P = 8;   // proto
+	$export.B = 16;  // bind
+	$export.W = 32;  // wrap
+	$export.U = 64;  // safe
+	$export.R = 128; // real proto method for `library` 
+	module.exports = $export;
+
+/***/ },
+/* 14 */
+/***/ function(module, exports) {
+
+	module.exports = function(it){
+	  return typeof it === 'object' ? it !== null : typeof it === 'function';
+	};
+
+/***/ },
+/* 15 */
+/***/ function(module, exports) {
+
+	exports.f = {}.propertyIsEnumerable;
+
+/***/ },
+/* 16 */
+/***/ function(module, exports) {
+
+	module.exports = function(bitmap, value){
+	  return {
+	    enumerable  : !(bitmap & 1),
+	    configurable: !(bitmap & 2),
+	    writable    : !(bitmap & 4),
+	    value       : value
+	  };
+	};
+
+/***/ },
+/* 17 */
+/***/ function(module, exports) {
+
+	var id = 0
+	  , px = Math.random();
+	module.exports = function(key){
+	  return 'Symbol('.concat(key === undefined ? '' : key, ')_', (++id + px).toString(36));
+	};
+
+/***/ },
+/* 18 */
+/***/ function(module, exports) {
+
+	var toString = {}.toString;
+
+	module.exports = function(it){
+	  return toString.call(it).slice(8, -1);
+	};
+
+/***/ },
+/* 19 */
+/***/ function(module, exports) {
+
+	// 7.2.1 RequireObjectCoercible(argument)
+	module.exports = function(it){
+	  if(it == undefined)throw TypeError("Can't call method on  " + it);
+	  return it;
+	};
+
+/***/ },
+/* 20 */
+/***/ function(module, exports) {
+
+	// IE 8- don't enum bug keys
+	module.exports = (
+	  'constructor,hasOwnProperty,isPrototypeOf,propertyIsEnumerable,toLocaleString,toString,valueOf'
+	).split(',');
+
+/***/ },
+/* 21 */
+/***/ function(module, exports) {
+
+	module.exports = true;
+
+/***/ },
+/* 22 */
+/***/ function(module, exports) {
+
+	exports.f = Object.getOwnPropertySymbols;
+
+/***/ },
+/* 23 */
+/***/ function(module, exports, __webpack_require__) {
+
+	var def = __webpack_require__(6).f
+	  , has = __webpack_require__(5)
+	  , TAG = __webpack_require__(1)('toStringTag');
+
+	module.exports = function(it, tag, stat){
+	  if(it && !has(it = stat ? it : it.prototype, TAG))def(it, TAG, {configurable: true, value: tag});
+	};
+
+/***/ },
+/* 24 */
+/***/ function(module, exports, __webpack_require__) {
+
+	var shared = __webpack_require__(25)('keys')
+	  , uid    = __webpack_require__(17);
+	module.exports = function(key){
+	  return shared[key] || (shared[key] = uid(key));
+	};
+
+/***/ },
+/* 25 */
+/***/ function(module, exports, __webpack_require__) {
+
+	var global = __webpack_require__(3)
+	  , SHARED = '__core-js_shared__'
+	  , store  = global[SHARED] || (global[SHARED] = {});
+	module.exports = function(key){
+	  return store[key] || (store[key] = {});
+	};
+
+/***/ },
+/* 26 */
+/***/ function(module, exports) {
+
+	// 7.1.4 ToInteger
+	var ceil  = Math.ceil
+	  , floor = Math.floor;
+	module.exports = function(it){
+	  return isNaN(it = +it) ? 0 : (it > 0 ? floor : ceil)(it);
+	};
+
+/***/ },
+/* 27 */
+/***/ function(module, exports, __webpack_require__) {
+
+	// 7.1.1 ToPrimitive(input [, PreferredType])
+	var isObject = __webpack_require__(14);
+	// instead of the ES6 spec version, we didn't implement @@toPrimitive case
+	// and the second argument - flag - preferred type is a string
+	module.exports = function(it, S){
+	  if(!isObject(it))return it;
+	  var fn, val;
+	  if(S && typeof (fn = it.toString) == 'function' && !isObject(val = fn.call(it)))return val;
+	  if(typeof (fn = it.valueOf) == 'function' && !isObject(val = fn.call(it)))return val;
+	  if(!S && typeof (fn = it.toString) == 'function' && !isObject(val = fn.call(it)))return val;
+	  throw TypeError("Can't convert object to primitive value");
+	};
+
+/***/ },
+/* 28 */
+/***/ function(module, exports, __webpack_require__) {
+
+	var global         = __webpack_require__(3)
+	  , core           = __webpack_require__(2)
+	  , LIBRARY        = __webpack_require__(21)
+	  , wksExt         = __webpack_require__(29)
+	  , defineProperty = __webpack_require__(6).f;
+	module.exports = function(name){
+	  var $Symbol = core.Symbol || (core.Symbol = LIBRARY ? {} : global.Symbol || {});
+	  if(name.charAt(0) != '_' && !(name in $Symbol))defineProperty($Symbol, name, {value: wksExt.f(name)});
+	};
+
+/***/ },
+/* 29 */
+/***/ function(module, exports, __webpack_require__) {
+
+	exports.f = __webpack_require__(1);
+
+/***/ },
+/* 30 */
+/***/ function(module, exports, __webpack_require__) {
+
+	'use strict';
+	var $at  = __webpack_require__(78)(true);
+
+	// 21.1.3.27 String.prototype[@@iterator]()
+	__webpack_require__(37)(String, 'String', function(iterated){
+	  this._t = String(iterated); // target
+	  this._i = 0;                // next index
+	// 21.1.5.2.1 %StringIteratorPrototype%.next()
+	}, function(){
+	  var O     = this._t
+	    , index = this._i
+	    , point;
+	  if(index >= O.length)return {value: undefined, done: true};
+	  point = $at(O, index);
+	  this._i += point.length;
+	  return {value: point, done: false};
+	});
+
+/***/ },
+/* 31 */
+/***/ function(module, exports, __webpack_require__) {
+
+	__webpack_require__(84);
+	var global        = __webpack_require__(3)
+	  , hide          = __webpack_require__(8)
+	  , Iterators     = __webpack_require__(11)
+	  , TO_STRING_TAG = __webpack_require__(1)('toStringTag');
+
+	for(var collections = ['NodeList', 'DOMTokenList', 'MediaList', 'StyleSheetList', 'CSSRuleList'], i = 0; i < 5; i++){
+	  var NAME       = collections[i]
+	    , Collection = global[NAME]
+	    , proto      = Collection && Collection.prototype;
+	  if(proto && !proto[TO_STRING_TAG])hide(proto, TO_STRING_TAG, NAME);
+	  Iterators[NAME] = Iterators.Array;
+	}
+
+/***/ },
+/* 32 */
+/***/ function(module, exports, __webpack_require__) {
+
+	module.exports = { "default": __webpack_require__(59), __esModule: true };
+
+/***/ },
+/* 33 */
+/***/ function(module, exports, __webpack_require__) {
+
+	// getting tag from 19.1.3.6 Object.prototype.toString()
+	var cof = __webpack_require__(18)
+	  , TAG = __webpack_require__(1)('toStringTag')
+	  // ES3 wrong here
+	  , ARG = cof(function(){ return arguments; }()) == 'Arguments';
+
+	// fallback for IE11 Script Access Denied error
+	var tryGet = function(it, key){
+	  try {
+	    return it[key];
+	  } catch(e){ /* empty */ }
+	};
+
+	module.exports = function(it){
+	  var O, T, B;
+	  return it === undefined ? 'Undefined' : it === null ? 'Null'
+	    // @@toStringTag case
+	    : typeof (T = tryGet(O = Object(it), TAG)) == 'string' ? T
+	    // builtinTag case
+	    : ARG ? cof(O)
+	    // ES3 arguments fallback
+	    : (B = cof(O)) == 'Object' && typeof O.callee == 'function' ? 'Arguments' : B;
+	};
+
+/***/ },
+/* 34 */
+/***/ function(module, exports, __webpack_require__) {
+
+	var isObject = __webpack_require__(14)
+	  , document = __webpack_require__(3).document
+	  // in old IE typeof document.createElement is 'object'
+	  , is = isObject(document) && isObject(document.createElement);
+	module.exports = function(it){
+	  return is ? document.createElement(it) : {};
+	};
+
+/***/ },
+/* 35 */
+/***/ function(module, exports, __webpack_require__) {
+
+	module.exports = !__webpack_require__(4) && !__webpack_require__(10)(function(){
+	  return Object.defineProperty(__webpack_require__(34)('div'), 'a', {get: function(){ return 7; }}).a != 7;
+	});
+
+/***/ },
+/* 36 */
+/***/ function(module, exports, __webpack_require__) {
+
+	// fallback for non-array-like ES3 and non-enumerable old V8 strings
+	var cof = __webpack_require__(18);
+	module.exports = Object('z').propertyIsEnumerable(0) ? Object : function(it){
+	  return cof(it) == 'String' ? it.split('') : Object(it);
+	};
+
+/***/ },
+/* 37 */
+/***/ function(module, exports, __webpack_require__) {
+
+	'use strict';
+	var LIBRARY        = __webpack_require__(21)
+	  , $export        = __webpack_require__(13)
+	  , redefine       = __webpack_require__(41)
+	  , hide           = __webpack_require__(8)
+	  , has            = __webpack_require__(5)
+	  , Iterators      = __webpack_require__(11)
+	  , $iterCreate    = __webpack_require__(69)
+	  , setToStringTag = __webpack_require__(23)
+	  , getPrototypeOf = __webpack_require__(77)
+	  , ITERATOR       = __webpack_require__(1)('iterator')
+	  , BUGGY          = !([].keys && 'next' in [].keys()) // Safari has buggy iterators w/o `next`
+	  , FF_ITERATOR    = '@@iterator'
+	  , KEYS           = 'keys'
+	  , VALUES         = 'values';
+
+	var returnThis = function(){ return this; };
+
+	module.exports = function(Base, NAME, Constructor, next, DEFAULT, IS_SET, FORCED){
+	  $iterCreate(Constructor, NAME, next);
+	  var getMethod = function(kind){
+	    if(!BUGGY && kind in proto)return proto[kind];
+	    switch(kind){
+	      case KEYS: return function keys(){ return new Constructor(this, kind); };
+	      case VALUES: return function values(){ return new Constructor(this, kind); };
+	    } return function entries(){ return new Constructor(this, kind); };
+	  };
+	  var TAG        = NAME + ' Iterator'
+	    , DEF_VALUES = DEFAULT == VALUES
+	    , VALUES_BUG = false
+	    , proto      = Base.prototype
+	    , $native    = proto[ITERATOR] || proto[FF_ITERATOR] || DEFAULT && proto[DEFAULT]
+	    , $default   = $native || getMethod(DEFAULT)
+	    , $entries   = DEFAULT ? !DEF_VALUES ? $default : getMethod('entries') : undefined
+	    , $anyNative = NAME == 'Array' ? proto.entries || $native : $native
+	    , methods, key, IteratorPrototype;
+	  // Fix native
+	  if($anyNative){
+	    IteratorPrototype = getPrototypeOf($anyNative.call(new Base));
+	    if(IteratorPrototype !== Object.prototype){
+	      // Set @@toStringTag to native iterators
+	      setToStringTag(IteratorPrototype, TAG, true);
+	      // fix for some old engines
+	      if(!LIBRARY && !has(IteratorPrototype, ITERATOR))hide(IteratorPrototype, ITERATOR, returnThis);
+	    }
+	  }
+	  // fix Array#{values, @@iterator}.name in V8 / FF
+	  if(DEF_VALUES && $native && $native.name !== VALUES){
+	    VALUES_BUG = true;
+	    $default = function values(){ return $native.call(this); };
+	  }
+	  // Define iterator
+	  if((!LIBRARY || FORCED) && (BUGGY || VALUES_BUG || !proto[ITERATOR])){
+	    hide(proto, ITERATOR, $default);
+	  }
+	  // Plug for library
+	  Iterators[NAME] = $default;
+	  Iterators[TAG]  = returnThis;
+	  if(DEFAULT){
+	    methods = {
+	      values:  DEF_VALUES ? $default : getMethod(VALUES),
+	      keys:    IS_SET     ? $default : getMethod(KEYS),
+	      entries: $entries
+	    };
+	    if(FORCED)for(key in methods){
+	      if(!(key in proto))redefine(proto, key, methods[key]);
+	    } else $export($export.P + $export.F * (BUGGY || VALUES_BUG), NAME, methods);
+	  }
+	  return methods;
+	};
+
+/***/ },
+/* 38 */
+/***/ function(module, exports, __webpack_require__) {
+
+	// 19.1.2.2 / 15.2.3.5 Object.create(O [, Properties])
+	var anObject    = __webpack_require__(9)
+	  , dPs         = __webpack_require__(74)
+	  , enumBugKeys = __webpack_require__(20)
+	  , IE_PROTO    = __webpack_require__(24)('IE_PROTO')
+	  , Empty       = function(){ /* empty */ }
+	  , PROTOTYPE   = 'prototype';
+
+	// Create object with fake `null` prototype: use iframe Object with cleared prototype
+	var createDict = function(){
+	  // Thrash, waste and sodomy: IE GC bug
+	  var iframe = __webpack_require__(34)('iframe')
+	    , i      = enumBugKeys.length
+	    , lt     = '<'
+	    , gt     = '>'
+	    , iframeDocument;
+	  iframe.style.display = 'none';
+	  __webpack_require__(67).appendChild(iframe);
+	  iframe.src = 'javascript:'; // eslint-disable-line no-script-url
+	  // createDict = iframe.contentWindow.Object;
+	  // html.removeChild(iframe);
+	  iframeDocument = iframe.contentWindow.document;
+	  iframeDocument.open();
+	  iframeDocument.write(lt + 'script' + gt + 'document.F=Object' + lt + '/script' + gt);
+	  iframeDocument.close();
+	  createDict = iframeDocument.F;
+	  while(i--)delete createDict[PROTOTYPE][enumBugKeys[i]];
+	  return createDict();
+	};
+
+	module.exports = Object.create || function create(O, Properties){
+	  var result;
+	  if(O !== null){
+	    Empty[PROTOTYPE] = anObject(O);
+	    result = new Empty;
+	    Empty[PROTOTYPE] = null;
+	    // add "__proto__" for Object.getPrototypeOf polyfill
+	    result[IE_PROTO] = O;
+	  } else result = createDict();
+	  return Properties === undefined ? result : dPs(result, Properties);
+	};
+
+
+/***/ },
+/* 39 */
+/***/ function(module, exports, __webpack_require__) {
+
+	// 19.1.2.7 / 15.2.3.4 Object.getOwnPropertyNames(O)
+	var $keys      = __webpack_require__(40)
+	  , hiddenKeys = __webpack_require__(20).concat('length', 'prototype');
+
+	exports.f = Object.getOwnPropertyNames || function getOwnPropertyNames(O){
+	  return $keys(O, hiddenKeys);
+	};
+
+/***/ },
+/* 40 */
+/***/ function(module, exports, __webpack_require__) {
+
+	var has          = __webpack_require__(5)
+	  , toIObject    = __webpack_require__(7)
+	  , arrayIndexOf = __webpack_require__(64)(false)
+	  , IE_PROTO     = __webpack_require__(24)('IE_PROTO');
+
+	module.exports = function(object, names){
+	  var O      = toIObject(object)
+	    , i      = 0
+	    , result = []
+	    , key;
+	  for(key in O)if(key != IE_PROTO)has(O, key) && result.push(key);
+	  // Don't enum bug & hidden keys
+	  while(names.length > i)if(has(O, key = names[i++])){
+	    ~arrayIndexOf(result, key) || result.push(key);
+	  }
+	  return result;
+	};
+
+/***/ },
+/* 41 */
+/***/ function(module, exports, __webpack_require__) {
+
+	module.exports = __webpack_require__(8);
+
+/***/ },
+/* 42 */
+/***/ function(module, exports, __webpack_require__) {
+
+	// 7.1.13 ToObject(argument)
+	var defined = __webpack_require__(19);
+	module.exports = function(it){
+	  return Object(defined(it));
+	};
+
+/***/ },
+/* 43 */
+/***/ function(module, exports, __webpack_require__) {
+
+	module.exports = { "default": __webpack_require__(56), __esModule: true };
+
+/***/ },
+/* 44 */
+/***/ function(module, exports, __webpack_require__) {
+
+	module.exports = { "default": __webpack_require__(57), __esModule: true };
+
+/***/ },
+/* 45 */
+/***/ function(module, exports, __webpack_require__) {
+
+	module.exports = { "default": __webpack_require__(58), __esModule: true };
+
+/***/ },
+/* 46 */
+/***/ function(module, exports, __webpack_require__) {
+
+	module.exports = { "default": __webpack_require__(60), __esModule: true };
+
+/***/ },
+/* 47 */
+/***/ function(module, exports, __webpack_require__) {
+
+	module.exports = { "default": __webpack_require__(61), __esModule: true };
+
+/***/ },
+/* 48 */
+/***/ function(module, exports) {
+
+	"use strict";
+
+	exports.__esModule = true;
+
+	exports.default = function (instance, Constructor) {
+	  if (!(instance instanceof Constructor)) {
+	    throw new TypeError("Cannot call a class as a function");
+	  }
+	};
+
+/***/ },
+/* 49 */
+/***/ function(module, exports, __webpack_require__) {
+
+	"use strict";
+
+	exports.__esModule = true;
+
+	var _defineProperty = __webpack_require__(32);
+
+	var _defineProperty2 = _interopRequireDefault(_defineProperty);
+
+	function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+	exports.default = function () {
+	  function defineProperties(target, props) {
+	    for (var i = 0; i < props.length; i++) {
+	      var descriptor = props[i];
+	      descriptor.enumerable = descriptor.enumerable || false;
+	      descriptor.configurable = true;
+	      if ("value" in descriptor) descriptor.writable = true;
+	      (0, _defineProperty2.default)(target, descriptor.key, descriptor);
+	    }
+	  }
+
+	  return function (Constructor, protoProps, staticProps) {
+	    if (protoProps) defineProperties(Constructor.prototype, protoProps);
+	    if (staticProps) defineProperties(Constructor, staticProps);
+	    return Constructor;
+	  };
+	}();
+
+/***/ },
+/* 50 */
+/***/ function(module, exports, __webpack_require__) {
+
+	"use strict";
+
+	exports.__esModule = true;
+
+	var _defineProperty = __webpack_require__(32);
+
+	var _defineProperty2 = _interopRequireDefault(_defineProperty);
+
+	function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+	exports.default = function (obj, key, value) {
+	  if (key in obj) {
+	    (0, _defineProperty2.default)(obj, key, {
+	      value: value,
+	      enumerable: true,
+	      configurable: true,
+	      writable: true
+	    });
+	  } else {
+	    obj[key] = value;
+	  }
+
+	  return obj;
+	};
+
+/***/ },
+/* 51 */
+/***/ function(module, exports, __webpack_require__) {
+
+	"use strict";
+
+	exports.__esModule = true;
+
+	var _assign = __webpack_require__(45);
+
+	var _assign2 = _interopRequireDefault(_assign);
+
+	function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+	exports.default = _assign2.default || function (target) {
+	  for (var i = 1; i < arguments.length; i++) {
+	    var source = arguments[i];
+
+	    for (var key in source) {
+	      if (Object.prototype.hasOwnProperty.call(source, key)) {
+	        target[key] = source[key];
+	      }
+	    }
+	  }
+
+	  return target;
+	};
+
+/***/ },
+/* 52 */
+/***/ function(module, exports, __webpack_require__) {
+
+	"use strict";
+
+	exports.__esModule = true;
+
+	var _isIterable2 = __webpack_require__(44);
+
+	var _isIterable3 = _interopRequireDefault(_isIterable2);
+
+	var _getIterator2 = __webpack_require__(43);
+
+	var _getIterator3 = _interopRequireDefault(_getIterator2);
+
+	function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+	exports.default = function () {
+	  function sliceIterator(arr, i) {
+	    var _arr = [];
+	    var _n = true;
+	    var _d = false;
+	    var _e = undefined;
+
+	    try {
+	      for (var _i = (0, _getIterator3.default)(arr), _s; !(_n = (_s = _i.next()).done); _n = true) {
+	        _arr.push(_s.value);
+
+	        if (i && _arr.length === i) break;
+	      }
+	    } catch (err) {
+	      _d = true;
+	      _e = err;
+	    } finally {
+	      try {
+	        if (!_n && _i["return"]) _i["return"]();
+	      } finally {
+	        if (_d) throw _e;
+	      }
+	    }
+
+	    return _arr;
+	  }
+
+	  return function (arr, i) {
+	    if (Array.isArray(arr)) {
+	      return arr;
+	    } else if ((0, _isIterable3.default)(Object(arr))) {
+	      return sliceIterator(arr, i);
+	    } else {
+	      throw new TypeError("Invalid attempt to destructure non-iterable instance");
+	    }
+	  };
+	}();
+
+/***/ },
+/* 53 */
+/***/ function(module, exports, __webpack_require__) {
+
+	"use strict";
+
+	exports.__esModule = true;
+
+	var _iterator = __webpack_require__(47);
+
+	var _iterator2 = _interopRequireDefault(_iterator);
+
+	var _symbol = __webpack_require__(46);
+
+	var _symbol2 = _interopRequireDefault(_symbol);
+
+	var _typeof = typeof _symbol2.default === "function" && typeof _iterator2.default === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof _symbol2.default === "function" && obj.constructor === _symbol2.default ? "symbol" : typeof obj; };
+
+	function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+	exports.default = typeof _symbol2.default === "function" && _typeof(_iterator2.default) === "symbol" ? function (obj) {
+	  return typeof obj === "undefined" ? "undefined" : _typeof(obj);
+	} : function (obj) {
+	  return obj && typeof _symbol2.default === "function" && obj.constructor === _symbol2.default ? "symbol" : typeof obj === "undefined" ? "undefined" : _typeof(obj);
+	};
+
+/***/ },
+/* 54 */
+/***/ function(module, exports, __webpack_require__) {
+
+	module.exports = __webpack_require__(92);
+
+
+/***/ },
+/* 55 */
+/***/ function(module, exports) {
+
+	'use strict';
+
+	Object.defineProperty(exports, "__esModule", {
+	  value: true
+	});
+	var createChangeEmitter = exports.createChangeEmitter = function createChangeEmitter() {
+	  var currentListeners = [];
+	  var nextListeners = currentListeners;
+
+	  function ensureCanMutateNextListeners() {
+	    if (nextListeners === currentListeners) {
+	      nextListeners = currentListeners.slice();
+	    }
+	  }
+
+	  function listen(listener) {
+	    if (typeof listener !== 'function') {
+	      throw new Error('Expected listener to be a function.');
+	    }
+
+	    var isSubscribed = true;
+
+	    ensureCanMutateNextListeners();
+	    nextListeners.push(listener);
+
+	    return function () {
+	      if (!isSubscribed) {
+	        return;
+	      }
+
+	      isSubscribed = false;
+
+	      ensureCanMutateNextListeners();
+	      var index = nextListeners.indexOf(listener);
+	      nextListeners.splice(index, 1);
+	    };
+	  }
+
+	  function emit() {
+	    currentListeners = nextListeners;
+	    var listeners = currentListeners;
+	    for (var i = 0; i < listeners.length; i++) {
+	      listeners[i].apply(listeners, arguments);
+	    }
+	  }
+
+	  return {
+	    listen: listen,
+	    emit: emit
+	  };
+	};
+
+/***/ },
+/* 56 */
+/***/ function(module, exports, __webpack_require__) {
+
+	__webpack_require__(31);
+	__webpack_require__(30);
+	module.exports = __webpack_require__(82);
+
+/***/ },
+/* 57 */
+/***/ function(module, exports, __webpack_require__) {
+
+	__webpack_require__(31);
+	__webpack_require__(30);
+	module.exports = __webpack_require__(83);
+
+/***/ },
+/* 58 */
+/***/ function(module, exports, __webpack_require__) {
+
+	__webpack_require__(85);
+	module.exports = __webpack_require__(2).Object.assign;
+
+/***/ },
+/* 59 */
+/***/ function(module, exports, __webpack_require__) {
+
+	__webpack_require__(86);
+	var $Object = __webpack_require__(2).Object;
+	module.exports = function defineProperty(it, key, desc){
+	  return $Object.defineProperty(it, key, desc);
+	};
+
+/***/ },
+/* 60 */
+/***/ function(module, exports, __webpack_require__) {
+
+	__webpack_require__(88);
+	__webpack_require__(87);
+	__webpack_require__(89);
+	__webpack_require__(90);
+	module.exports = __webpack_require__(2).Symbol;
+
+/***/ },
+/* 61 */
+/***/ function(module, exports, __webpack_require__) {
+
+	__webpack_require__(30);
+	__webpack_require__(31);
+	module.exports = __webpack_require__(29).f('iterator');
+
+/***/ },
+/* 62 */
+/***/ function(module, exports) {
+
+	module.exports = function(it){
+	  if(typeof it != 'function')throw TypeError(it + ' is not a function!');
+	  return it;
+	};
+
+/***/ },
+/* 63 */
+/***/ function(module, exports) {
+
+	module.exports = function(){ /* empty */ };
+
+/***/ },
+/* 64 */
+/***/ function(module, exports, __webpack_require__) {
+
+	// false -> Array#indexOf
+	// true  -> Array#includes
+	var toIObject = __webpack_require__(7)
+	  , toLength  = __webpack_require__(80)
+	  , toIndex   = __webpack_require__(79);
+	module.exports = function(IS_INCLUDES){
+	  return function($this, el, fromIndex){
+	    var O      = toIObject($this)
+	      , length = toLength(O.length)
+	      , index  = toIndex(fromIndex, length)
+	      , value;
+	    // Array#includes uses SameValueZero equality algorithm
+	    if(IS_INCLUDES && el != el)while(length > index){
+	      value = O[index++];
+	      if(value != value)return true;
+	    // Array#toIndex ignores holes, Array#includes - not
+	    } else for(;length > index; index++)if(IS_INCLUDES || index in O){
+	      if(O[index] === el)return IS_INCLUDES || index || 0;
+	    } return !IS_INCLUDES && -1;
+	  };
+	};
+
+/***/ },
+/* 65 */
+/***/ function(module, exports, __webpack_require__) {
+
+	// optional / simple context binding
+	var aFunction = __webpack_require__(62);
+	module.exports = function(fn, that, length){
+	  aFunction(fn);
+	  if(that === undefined)return fn;
+	  switch(length){
+	    case 1: return function(a){
+	      return fn.call(that, a);
+	    };
+	    case 2: return function(a, b){
+	      return fn.call(that, a, b);
+	    };
+	    case 3: return function(a, b, c){
+	      return fn.call(that, a, b, c);
+	    };
+	  }
+	  return function(/* ...args */){
+	    return fn.apply(that, arguments);
+	  };
+	};
+
+/***/ },
+/* 66 */
+/***/ function(module, exports, __webpack_require__) {
+
+	// all enumerable object keys, includes symbols
+	var getKeys = __webpack_require__(12)
+	  , gOPS    = __webpack_require__(22)
+	  , pIE     = __webpack_require__(15);
+	module.exports = function(it){
+	  var result     = getKeys(it)
+	    , getSymbols = gOPS.f;
+	  if(getSymbols){
+	    var symbols = getSymbols(it)
+	      , isEnum  = pIE.f
+	      , i       = 0
+	      , key;
+	    while(symbols.length > i)if(isEnum.call(it, key = symbols[i++]))result.push(key);
+	  } return result;
+	};
+
+/***/ },
+/* 67 */
+/***/ function(module, exports, __webpack_require__) {
+
+	module.exports = __webpack_require__(3).document && document.documentElement;
+
+/***/ },
+/* 68 */
+/***/ function(module, exports, __webpack_require__) {
+
+	// 7.2.2 IsArray(argument)
+	var cof = __webpack_require__(18);
+	module.exports = Array.isArray || function isArray(arg){
+	  return cof(arg) == 'Array';
+	};
+
+/***/ },
+/* 69 */
+/***/ function(module, exports, __webpack_require__) {
+
+	'use strict';
+	var create         = __webpack_require__(38)
+	  , descriptor     = __webpack_require__(16)
+	  , setToStringTag = __webpack_require__(23)
+	  , IteratorPrototype = {};
+
+	// 25.1.2.1.1 %IteratorPrototype%[@@iterator]()
+	__webpack_require__(8)(IteratorPrototype, __webpack_require__(1)('iterator'), function(){ return this; });
+
+	module.exports = function(Constructor, NAME, next){
+	  Constructor.prototype = create(IteratorPrototype, {next: descriptor(1, next)});
+	  setToStringTag(Constructor, NAME + ' Iterator');
+	};
+
+/***/ },
+/* 70 */
+/***/ function(module, exports) {
+
+	module.exports = function(done, value){
+	  return {value: value, done: !!done};
+	};
+
+/***/ },
+/* 71 */
+/***/ function(module, exports, __webpack_require__) {
+
+	var getKeys   = __webpack_require__(12)
+	  , toIObject = __webpack_require__(7);
+	module.exports = function(object, el){
+	  var O      = toIObject(object)
+	    , keys   = getKeys(O)
+	    , length = keys.length
+	    , index  = 0
+	    , key;
+	  while(length > index)if(O[key = keys[index++]] === el)return key;
+	};
+
+/***/ },
+/* 72 */
+/***/ function(module, exports, __webpack_require__) {
+
+	var META     = __webpack_require__(17)('meta')
+	  , isObject = __webpack_require__(14)
+	  , has      = __webpack_require__(5)
+	  , setDesc  = __webpack_require__(6).f
+	  , id       = 0;
+	var isExtensible = Object.isExtensible || function(){
+	  return true;
+	};
+	var FREEZE = !__webpack_require__(10)(function(){
+	  return isExtensible(Object.preventExtensions({}));
+	});
+	var setMeta = function(it){
+	  setDesc(it, META, {value: {
+	    i: 'O' + ++id, // object ID
+	    w: {}          // weak collections IDs
+	  }});
+	};
+	var fastKey = function(it, create){
+	  // return primitive with prefix
+	  if(!isObject(it))return typeof it == 'symbol' ? it : (typeof it == 'string' ? 'S' : 'P') + it;
+	  if(!has(it, META)){
+	    // can't set metadata to uncaught frozen object
+	    if(!isExtensible(it))return 'F';
+	    // not necessary to add metadata
+	    if(!create)return 'E';
+	    // add missing metadata
+	    setMeta(it);
+	  // return object ID
+	  } return it[META].i;
+	};
+	var getWeak = function(it, create){
+	  if(!has(it, META)){
+	    // can't set metadata to uncaught frozen object
+	    if(!isExtensible(it))return true;
+	    // not necessary to add metadata
+	    if(!create)return false;
+	    // add missing metadata
+	    setMeta(it);
+	  // return hash weak collections IDs
+	  } return it[META].w;
+	};
+	// add metadata on freeze-family methods calling
+	var onFreeze = function(it){
+	  if(FREEZE && meta.NEED && isExtensible(it) && !has(it, META))setMeta(it);
+	  return it;
+	};
+	var meta = module.exports = {
+	  KEY:      META,
+	  NEED:     false,
+	  fastKey:  fastKey,
+	  getWeak:  getWeak,
+	  onFreeze: onFreeze
+	};
+
+/***/ },
+/* 73 */
+/***/ function(module, exports, __webpack_require__) {
+
+	'use strict';
+	// 19.1.2.1 Object.assign(target, source, ...)
+	var getKeys  = __webpack_require__(12)
+	  , gOPS     = __webpack_require__(22)
+	  , pIE      = __webpack_require__(15)
+	  , toObject = __webpack_require__(42)
+	  , IObject  = __webpack_require__(36)
+	  , $assign  = Object.assign;
+
+	// should work with symbols and should have deterministic property order (V8 bug)
+	module.exports = !$assign || __webpack_require__(10)(function(){
+	  var A = {}
+	    , B = {}
+	    , S = Symbol()
+	    , K = 'abcdefghijklmnopqrst';
+	  A[S] = 7;
+	  K.split('').forEach(function(k){ B[k] = k; });
+	  return $assign({}, A)[S] != 7 || Object.keys($assign({}, B)).join('') != K;
+	}) ? function assign(target, source){ // eslint-disable-line no-unused-vars
+	  var T     = toObject(target)
+	    , aLen  = arguments.length
+	    , index = 1
+	    , getSymbols = gOPS.f
+	    , isEnum     = pIE.f;
+	  while(aLen > index){
+	    var S      = IObject(arguments[index++])
+	      , keys   = getSymbols ? getKeys(S).concat(getSymbols(S)) : getKeys(S)
+	      , length = keys.length
+	      , j      = 0
+	      , key;
+	    while(length > j)if(isEnum.call(S, key = keys[j++]))T[key] = S[key];
+	  } return T;
+	} : $assign;
+
+/***/ },
+/* 74 */
+/***/ function(module, exports, __webpack_require__) {
+
+	var dP       = __webpack_require__(6)
+	  , anObject = __webpack_require__(9)
+	  , getKeys  = __webpack_require__(12);
+
+	module.exports = __webpack_require__(4) ? Object.defineProperties : function defineProperties(O, Properties){
+	  anObject(O);
+	  var keys   = getKeys(Properties)
+	    , length = keys.length
+	    , i = 0
+	    , P;
+	  while(length > i)dP.f(O, P = keys[i++], Properties[P]);
+	  return O;
+	};
+
+/***/ },
+/* 75 */
+/***/ function(module, exports, __webpack_require__) {
+
+	var pIE            = __webpack_require__(15)
+	  , createDesc     = __webpack_require__(16)
+	  , toIObject      = __webpack_require__(7)
+	  , toPrimitive    = __webpack_require__(27)
+	  , has            = __webpack_require__(5)
+	  , IE8_DOM_DEFINE = __webpack_require__(35)
+	  , gOPD           = Object.getOwnPropertyDescriptor;
+
+	exports.f = __webpack_require__(4) ? gOPD : function getOwnPropertyDescriptor(O, P){
+	  O = toIObject(O);
+	  P = toPrimitive(P, true);
+	  if(IE8_DOM_DEFINE)try {
+	    return gOPD(O, P);
+	  } catch(e){ /* empty */ }
+	  if(has(O, P))return createDesc(!pIE.f.call(O, P), O[P]);
+	};
+
+/***/ },
+/* 76 */
+/***/ function(module, exports, __webpack_require__) {
+
+	// fallback for IE11 buggy Object.getOwnPropertyNames with iframe and window
+	var toIObject = __webpack_require__(7)
+	  , gOPN      = __webpack_require__(39).f
+	  , toString  = {}.toString;
+
+	var windowNames = typeof window == 'object' && window && Object.getOwnPropertyNames
+	  ? Object.getOwnPropertyNames(window) : [];
+
+	var getWindowNames = function(it){
+	  try {
+	    return gOPN(it);
+	  } catch(e){
+	    return windowNames.slice();
+	  }
+	};
+
+	module.exports.f = function getOwnPropertyNames(it){
+	  return windowNames && toString.call(it) == '[object Window]' ? getWindowNames(it) : gOPN(toIObject(it));
+	};
+
+
+/***/ },
+/* 77 */
+/***/ function(module, exports, __webpack_require__) {
+
+	// 19.1.2.9 / 15.2.3.2 Object.getPrototypeOf(O)
+	var has         = __webpack_require__(5)
+	  , toObject    = __webpack_require__(42)
+	  , IE_PROTO    = __webpack_require__(24)('IE_PROTO')
+	  , ObjectProto = Object.prototype;
+
+	module.exports = Object.getPrototypeOf || function(O){
+	  O = toObject(O);
+	  if(has(O, IE_PROTO))return O[IE_PROTO];
+	  if(typeof O.constructor == 'function' && O instanceof O.constructor){
+	    return O.constructor.prototype;
+	  } return O instanceof Object ? ObjectProto : null;
+	};
+
+/***/ },
+/* 78 */
+/***/ function(module, exports, __webpack_require__) {
+
+	var toInteger = __webpack_require__(26)
+	  , defined   = __webpack_require__(19);
+	// true  -> String#at
+	// false -> String#codePointAt
+	module.exports = function(TO_STRING){
+	  return function(that, pos){
+	    var s = String(defined(that))
+	      , i = toInteger(pos)
+	      , l = s.length
+	      , a, b;
+	    if(i < 0 || i >= l)return TO_STRING ? '' : undefined;
+	    a = s.charCodeAt(i);
+	    return a < 0xd800 || a > 0xdbff || i + 1 === l || (b = s.charCodeAt(i + 1)) < 0xdc00 || b > 0xdfff
+	      ? TO_STRING ? s.charAt(i) : a
+	      : TO_STRING ? s.slice(i, i + 2) : (a - 0xd800 << 10) + (b - 0xdc00) + 0x10000;
+	  };
+	};
+
+/***/ },
+/* 79 */
+/***/ function(module, exports, __webpack_require__) {
+
+	var toInteger = __webpack_require__(26)
+	  , max       = Math.max
+	  , min       = Math.min;
+	module.exports = function(index, length){
+	  index = toInteger(index);
+	  return index < 0 ? max(index + length, 0) : min(index, length);
+	};
+
+/***/ },
+/* 80 */
+/***/ function(module, exports, __webpack_require__) {
+
+	// 7.1.15 ToLength
+	var toInteger = __webpack_require__(26)
+	  , min       = Math.min;
+	module.exports = function(it){
+	  return it > 0 ? min(toInteger(it), 0x1fffffffffffff) : 0; // pow(2, 53) - 1 == 9007199254740991
+	};
+
+/***/ },
+/* 81 */
+/***/ function(module, exports, __webpack_require__) {
+
+	var classof   = __webpack_require__(33)
+	  , ITERATOR  = __webpack_require__(1)('iterator')
+	  , Iterators = __webpack_require__(11);
+	module.exports = __webpack_require__(2).getIteratorMethod = function(it){
+	  if(it != undefined)return it[ITERATOR]
+	    || it['@@iterator']
+	    || Iterators[classof(it)];
+	};
+
+/***/ },
+/* 82 */
+/***/ function(module, exports, __webpack_require__) {
+
+	var anObject = __webpack_require__(9)
+	  , get      = __webpack_require__(81);
+	module.exports = __webpack_require__(2).getIterator = function(it){
+	  var iterFn = get(it);
+	  if(typeof iterFn != 'function')throw TypeError(it + ' is not iterable!');
+	  return anObject(iterFn.call(it));
+	};
+
+/***/ },
+/* 83 */
+/***/ function(module, exports, __webpack_require__) {
+
+	var classof   = __webpack_require__(33)
+	  , ITERATOR  = __webpack_require__(1)('iterator')
+	  , Iterators = __webpack_require__(11);
+	module.exports = __webpack_require__(2).isIterable = function(it){
+	  var O = Object(it);
+	  return O[ITERATOR] !== undefined
+	    || '@@iterator' in O
+	    || Iterators.hasOwnProperty(classof(O));
+	};
+
+/***/ },
+/* 84 */
+/***/ function(module, exports, __webpack_require__) {
+
+	'use strict';
+	var addToUnscopables = __webpack_require__(63)
+	  , step             = __webpack_require__(70)
+	  , Iterators        = __webpack_require__(11)
+	  , toIObject        = __webpack_require__(7);
+
+	// 22.1.3.4 Array.prototype.entries()
+	// 22.1.3.13 Array.prototype.keys()
+	// 22.1.3.29 Array.prototype.values()
+	// 22.1.3.30 Array.prototype[@@iterator]()
+	module.exports = __webpack_require__(37)(Array, 'Array', function(iterated, kind){
+	  this._t = toIObject(iterated); // target
+	  this._i = 0;                   // next index
+	  this._k = kind;                // kind
+	// 22.1.5.2.1 %ArrayIteratorPrototype%.next()
+	}, function(){
+	  var O     = this._t
+	    , kind  = this._k
+	    , index = this._i++;
+	  if(!O || index >= O.length){
+	    this._t = undefined;
+	    return step(1);
+	  }
+	  if(kind == 'keys'  )return step(0, index);
+	  if(kind == 'values')return step(0, O[index]);
+	  return step(0, [index, O[index]]);
+	}, 'values');
+
+	// argumentsList[@@iterator] is %ArrayProto_values% (9.4.4.6, 9.4.4.7)
+	Iterators.Arguments = Iterators.Array;
+
+	addToUnscopables('keys');
+	addToUnscopables('values');
+	addToUnscopables('entries');
+
+/***/ },
+/* 85 */
+/***/ function(module, exports, __webpack_require__) {
+
+	// 19.1.3.1 Object.assign(target, source)
+	var $export = __webpack_require__(13);
+
+	$export($export.S + $export.F, 'Object', {assign: __webpack_require__(73)});
+
+/***/ },
+/* 86 */
+/***/ function(module, exports, __webpack_require__) {
+
+	var $export = __webpack_require__(13);
+	// 19.1.2.4 / 15.2.3.6 Object.defineProperty(O, P, Attributes)
+	$export($export.S + $export.F * !__webpack_require__(4), 'Object', {defineProperty: __webpack_require__(6).f});
+
+/***/ },
+/* 87 */
+/***/ function(module, exports) {
+
+	
+
+/***/ },
+/* 88 */
+/***/ function(module, exports, __webpack_require__) {
+
+	'use strict';
+	// ECMAScript 6 symbols shim
+	var global         = __webpack_require__(3)
+	  , has            = __webpack_require__(5)
+	  , DESCRIPTORS    = __webpack_require__(4)
+	  , $export        = __webpack_require__(13)
+	  , redefine       = __webpack_require__(41)
+	  , META           = __webpack_require__(72).KEY
+	  , $fails         = __webpack_require__(10)
+	  , shared         = __webpack_require__(25)
+	  , setToStringTag = __webpack_require__(23)
+	  , uid            = __webpack_require__(17)
+	  , wks            = __webpack_require__(1)
+	  , wksExt         = __webpack_require__(29)
+	  , wksDefine      = __webpack_require__(28)
+	  , keyOf          = __webpack_require__(71)
+	  , enumKeys       = __webpack_require__(66)
+	  , isArray        = __webpack_require__(68)
+	  , anObject       = __webpack_require__(9)
+	  , toIObject      = __webpack_require__(7)
+	  , toPrimitive    = __webpack_require__(27)
+	  , createDesc     = __webpack_require__(16)
+	  , _create        = __webpack_require__(38)
+	  , gOPNExt        = __webpack_require__(76)
+	  , $GOPD          = __webpack_require__(75)
+	  , $DP            = __webpack_require__(6)
+	  , $keys          = __webpack_require__(12)
+	  , gOPD           = $GOPD.f
+	  , dP             = $DP.f
+	  , gOPN           = gOPNExt.f
+	  , $Symbol        = global.Symbol
+	  , $JSON          = global.JSON
+	  , _stringify     = $JSON && $JSON.stringify
+	  , PROTOTYPE      = 'prototype'
+	  , HIDDEN         = wks('_hidden')
+	  , TO_PRIMITIVE   = wks('toPrimitive')
+	  , isEnum         = {}.propertyIsEnumerable
+	  , SymbolRegistry = shared('symbol-registry')
+	  , AllSymbols     = shared('symbols')
+	  , OPSymbols      = shared('op-symbols')
+	  , ObjectProto    = Object[PROTOTYPE]
+	  , USE_NATIVE     = typeof $Symbol == 'function'
+	  , QObject        = global.QObject;
+	// Don't use setters in Qt Script, https://github.com/zloirock/core-js/issues/173
+	var setter = !QObject || !QObject[PROTOTYPE] || !QObject[PROTOTYPE].findChild;
+
+	// fallback for old Android, https://code.google.com/p/v8/issues/detail?id=687
+	var setSymbolDesc = DESCRIPTORS && $fails(function(){
+	  return _create(dP({}, 'a', {
+	    get: function(){ return dP(this, 'a', {value: 7}).a; }
+	  })).a != 7;
+	}) ? function(it, key, D){
+	  var protoDesc = gOPD(ObjectProto, key);
+	  if(protoDesc)delete ObjectProto[key];
+	  dP(it, key, D);
+	  if(protoDesc && it !== ObjectProto)dP(ObjectProto, key, protoDesc);
+	} : dP;
+
+	var wrap = function(tag){
+	  var sym = AllSymbols[tag] = _create($Symbol[PROTOTYPE]);
+	  sym._k = tag;
+	  return sym;
+	};
+
+	var isSymbol = USE_NATIVE && typeof $Symbol.iterator == 'symbol' ? function(it){
+	  return typeof it == 'symbol';
+	} : function(it){
+	  return it instanceof $Symbol;
+	};
+
+	var $defineProperty = function defineProperty(it, key, D){
+	  if(it === ObjectProto)$defineProperty(OPSymbols, key, D);
+	  anObject(it);
+	  key = toPrimitive(key, true);
+	  anObject(D);
+	  if(has(AllSymbols, key)){
+	    if(!D.enumerable){
+	      if(!has(it, HIDDEN))dP(it, HIDDEN, createDesc(1, {}));
+	      it[HIDDEN][key] = true;
+	    } else {
+	      if(has(it, HIDDEN) && it[HIDDEN][key])it[HIDDEN][key] = false;
+	      D = _create(D, {enumerable: createDesc(0, false)});
+	    } return setSymbolDesc(it, key, D);
+	  } return dP(it, key, D);
+	};
+	var $defineProperties = function defineProperties(it, P){
+	  anObject(it);
+	  var keys = enumKeys(P = toIObject(P))
+	    , i    = 0
+	    , l = keys.length
+	    , key;
+	  while(l > i)$defineProperty(it, key = keys[i++], P[key]);
+	  return it;
+	};
+	var $create = function create(it, P){
+	  return P === undefined ? _create(it) : $defineProperties(_create(it), P);
+	};
+	var $propertyIsEnumerable = function propertyIsEnumerable(key){
+	  var E = isEnum.call(this, key = toPrimitive(key, true));
+	  if(this === ObjectProto && has(AllSymbols, key) && !has(OPSymbols, key))return false;
+	  return E || !has(this, key) || !has(AllSymbols, key) || has(this, HIDDEN) && this[HIDDEN][key] ? E : true;
+	};
+	var $getOwnPropertyDescriptor = function getOwnPropertyDescriptor(it, key){
+	  it  = toIObject(it);
+	  key = toPrimitive(key, true);
+	  if(it === ObjectProto && has(AllSymbols, key) && !has(OPSymbols, key))return;
+	  var D = gOPD(it, key);
+	  if(D && has(AllSymbols, key) && !(has(it, HIDDEN) && it[HIDDEN][key]))D.enumerable = true;
+	  return D;
+	};
+	var $getOwnPropertyNames = function getOwnPropertyNames(it){
+	  var names  = gOPN(toIObject(it))
+	    , result = []
+	    , i      = 0
+	    , key;
+	  while(names.length > i){
+	    if(!has(AllSymbols, key = names[i++]) && key != HIDDEN && key != META)result.push(key);
+	  } return result;
+	};
+	var $getOwnPropertySymbols = function getOwnPropertySymbols(it){
+	  var IS_OP  = it === ObjectProto
+	    , names  = gOPN(IS_OP ? OPSymbols : toIObject(it))
+	    , result = []
+	    , i      = 0
+	    , key;
+	  while(names.length > i){
+	    if(has(AllSymbols, key = names[i++]) && (IS_OP ? has(ObjectProto, key) : true))result.push(AllSymbols[key]);
+	  } return result;
+	};
+
+	// 19.4.1.1 Symbol([description])
+	if(!USE_NATIVE){
+	  $Symbol = function Symbol(){
+	    if(this instanceof $Symbol)throw TypeError('Symbol is not a constructor!');
+	    var tag = uid(arguments.length > 0 ? arguments[0] : undefined);
+	    var $set = function(value){
+	      if(this === ObjectProto)$set.call(OPSymbols, value);
+	      if(has(this, HIDDEN) && has(this[HIDDEN], tag))this[HIDDEN][tag] = false;
+	      setSymbolDesc(this, tag, createDesc(1, value));
+	    };
+	    if(DESCRIPTORS && setter)setSymbolDesc(ObjectProto, tag, {configurable: true, set: $set});
+	    return wrap(tag);
+	  };
+	  redefine($Symbol[PROTOTYPE], 'toString', function toString(){
+	    return this._k;
+	  });
+
+	  $GOPD.f = $getOwnPropertyDescriptor;
+	  $DP.f   = $defineProperty;
+	  __webpack_require__(39).f = gOPNExt.f = $getOwnPropertyNames;
+	  __webpack_require__(15).f  = $propertyIsEnumerable;
+	  __webpack_require__(22).f = $getOwnPropertySymbols;
+
+	  if(DESCRIPTORS && !__webpack_require__(21)){
+	    redefine(ObjectProto, 'propertyIsEnumerable', $propertyIsEnumerable, true);
+	  }
+
+	  wksExt.f = function(name){
+	    return wrap(wks(name));
+	  }
+	}
+
+	$export($export.G + $export.W + $export.F * !USE_NATIVE, {Symbol: $Symbol});
+
+	for(var symbols = (
+	  // 19.4.2.2, 19.4.2.3, 19.4.2.4, 19.4.2.6, 19.4.2.8, 19.4.2.9, 19.4.2.10, 19.4.2.11, 19.4.2.12, 19.4.2.13, 19.4.2.14
+	  'hasInstance,isConcatSpreadable,iterator,match,replace,search,species,split,toPrimitive,toStringTag,unscopables'
+	).split(','), i = 0; symbols.length > i; )wks(symbols[i++]);
+
+	for(var symbols = $keys(wks.store), i = 0; symbols.length > i; )wksDefine(symbols[i++]);
+
+	$export($export.S + $export.F * !USE_NATIVE, 'Symbol', {
+	  // 19.4.2.1 Symbol.for(key)
+	  'for': function(key){
+	    return has(SymbolRegistry, key += '')
+	      ? SymbolRegistry[key]
+	      : SymbolRegistry[key] = $Symbol(key);
+	  },
+	  // 19.4.2.5 Symbol.keyFor(sym)
+	  keyFor: function keyFor(key){
+	    if(isSymbol(key))return keyOf(SymbolRegistry, key);
+	    throw TypeError(key + ' is not a symbol!');
+	  },
+	  useSetter: function(){ setter = true; },
+	  useSimple: function(){ setter = false; }
+	});
+
+	$export($export.S + $export.F * !USE_NATIVE, 'Object', {
+	  // 19.1.2.2 Object.create(O [, Properties])
+	  create: $create,
+	  // 19.1.2.4 Object.defineProperty(O, P, Attributes)
+	  defineProperty: $defineProperty,
+	  // 19.1.2.3 Object.defineProperties(O, Properties)
+	  defineProperties: $defineProperties,
+	  // 19.1.2.6 Object.getOwnPropertyDescriptor(O, P)
+	  getOwnPropertyDescriptor: $getOwnPropertyDescriptor,
+	  // 19.1.2.7 Object.getOwnPropertyNames(O)
+	  getOwnPropertyNames: $getOwnPropertyNames,
+	  // 19.1.2.8 Object.getOwnPropertySymbols(O)
+	  getOwnPropertySymbols: $getOwnPropertySymbols
+	});
+
+	// 24.3.2 JSON.stringify(value [, replacer [, space]])
+	$JSON && $export($export.S + $export.F * (!USE_NATIVE || $fails(function(){
+	  var S = $Symbol();
+	  // MS Edge converts symbol values to JSON as {}
+	  // WebKit converts symbol values to JSON as null
+	  // V8 throws on boxed symbols
+	  return _stringify([S]) != '[null]' || _stringify({a: S}) != '{}' || _stringify(Object(S)) != '{}';
+	})), 'JSON', {
+	  stringify: function stringify(it){
+	    if(it === undefined || isSymbol(it))return; // IE8 returns string on undefined
+	    var args = [it]
+	      , i    = 1
+	      , replacer, $replacer;
+	    while(arguments.length > i)args.push(arguments[i++]);
+	    replacer = args[1];
+	    if(typeof replacer == 'function')$replacer = replacer;
+	    if($replacer || !isArray(replacer))replacer = function(key, value){
+	      if($replacer)value = $replacer.call(this, key, value);
+	      if(!isSymbol(value))return value;
+	    };
+	    args[1] = replacer;
+	    return _stringify.apply($JSON, args);
+	  }
+	});
+
+	// 19.4.3.4 Symbol.prototype[@@toPrimitive](hint)
+	$Symbol[PROTOTYPE][TO_PRIMITIVE] || __webpack_require__(8)($Symbol[PROTOTYPE], TO_PRIMITIVE, $Symbol[PROTOTYPE].valueOf);
+	// 19.4.3.5 Symbol.prototype[@@toStringTag]
+	setToStringTag($Symbol, 'Symbol');
+	// 20.2.1.9 Math[@@toStringTag]
+	setToStringTag(Math, 'Math', true);
+	// 24.3.3 JSON[@@toStringTag]
+	setToStringTag(global.JSON, 'JSON', true);
+
+/***/ },
+/* 89 */
+/***/ function(module, exports, __webpack_require__) {
+
+	__webpack_require__(28)('asyncIterator');
+
+/***/ },
+/* 90 */
+/***/ function(module, exports, __webpack_require__) {
+
+	__webpack_require__(28)('observable');
+
+/***/ },
+/* 91 */
+/***/ function(module, exports) {
+
+	// shim for using process in browser
+
+	var process = module.exports = {};
+
+	// cached from whatever global is present so that test runners that stub it
+	// don't break things.  But we need to wrap it in a try catch in case it is
+	// wrapped in strict mode code which doesn't define any globals.  It's inside a
+	// function because try/catches deoptimize in certain engines.
+
+	var cachedSetTimeout;
+	var cachedClearTimeout;
+
+	(function () {
+	  try {
+	    cachedSetTimeout = setTimeout;
+	  } catch (e) {
+	    cachedSetTimeout = function () {
+	      throw new Error('setTimeout is not defined');
+	    }
+	  }
+	  try {
+	    cachedClearTimeout = clearTimeout;
+	  } catch (e) {
+	    cachedClearTimeout = function () {
+	      throw new Error('clearTimeout is not defined');
+	    }
+	  }
+	} ())
+	var queue = [];
+	var draining = false;
+	var currentQueue;
+	var queueIndex = -1;
+
+	function cleanUpNextTick() {
+	    if (!draining || !currentQueue) {
+	        return;
+	    }
+	    draining = false;
+	    if (currentQueue.length) {
+	        queue = currentQueue.concat(queue);
+	    } else {
+	        queueIndex = -1;
+	    }
+	    if (queue.length) {
+	        drainQueue();
+	    }
+	}
+
+	function drainQueue() {
+	    if (draining) {
+	        return;
+	    }
+	    var timeout = cachedSetTimeout.call(null, cleanUpNextTick);
+	    draining = true;
+
+	    var len = queue.length;
+	    while(len) {
+	        currentQueue = queue;
+	        queue = [];
+	        while (++queueIndex < len) {
+	            if (currentQueue) {
+	                currentQueue[queueIndex].run();
+	            }
+	        }
+	        queueIndex = -1;
+	        len = queue.length;
+	    }
+	    currentQueue = null;
+	    draining = false;
+	    cachedClearTimeout.call(null, timeout);
+	}
+
+	process.nextTick = function (fun) {
+	    var args = new Array(arguments.length - 1);
+	    if (arguments.length > 1) {
+	        for (var i = 1; i < arguments.length; i++) {
+	            args[i - 1] = arguments[i];
+	        }
+	    }
+	    queue.push(new Item(fun, args));
+	    if (queue.length === 1 && !draining) {
+	        cachedSetTimeout.call(null, drainQueue, 0);
+	    }
+	};
+
+	// v8 likes predictible objects
+	function Item(fun, array) {
+	    this.fun = fun;
+	    this.array = array;
+	}
+	Item.prototype.run = function () {
+	    this.fun.apply(null, this.array);
+	};
+	process.title = 'browser';
+	process.browser = true;
+	process.env = {};
+	process.argv = [];
+	process.version = ''; // empty string to avoid regexp issues
+	process.versions = {};
+
+	function noop() {}
+
+	process.on = noop;
+	process.addListener = noop;
+	process.once = noop;
+	process.off = noop;
+	process.removeListener = noop;
+	process.removeAllListeners = noop;
+	process.emit = noop;
+
+	process.binding = function (name) {
+	    throw new Error('process.binding is not supported');
+	};
+
+	process.cwd = function () { return '/' };
+	process.chdir = function (dir) {
+	    throw new Error('process.chdir is not supported');
+	};
+	process.umask = function() { return 0; };
+
+
+/***/ },
+/* 92 */
+/***/ function(module, exports, __webpack_require__) {
+
+	/* WEBPACK VAR INJECTION */(function(global) {// This method of obtaining a reference to the global object needs to be
+	// kept identical to the way it is obtained in runtime.js
+	var g =
+	  typeof global === "object" ? global :
+	  typeof window === "object" ? window :
+	  typeof self === "object" ? self : this;
+
+	// Use `getOwnPropertyNames` because not all browsers support calling
+	// `hasOwnProperty` on the global `self` object in a worker. See #183.
+	var hadRuntime = g.regeneratorRuntime &&
+	  Object.getOwnPropertyNames(g).indexOf("regeneratorRuntime") >= 0;
+
+	// Save the old regeneratorRuntime in case it needs to be restored later.
+	var oldRuntime = hadRuntime && g.regeneratorRuntime;
+
+	// Force reevalutation of runtime.js.
+	g.regeneratorRuntime = undefined;
+
+	module.exports = __webpack_require__(93);
+
+	if (hadRuntime) {
+	  // Restore the original runtime.
+	  g.regeneratorRuntime = oldRuntime;
+	} else {
+	  // Remove the global property added by runtime.js.
+	  try {
+	    delete g.regeneratorRuntime;
+	  } catch(e) {
+	    g.regeneratorRuntime = undefined;
+	  }
+	}
+
+	/* WEBPACK VAR INJECTION */}.call(exports, (function() { return this; }())))
+
+/***/ },
+/* 93 */
+/***/ function(module, exports, __webpack_require__) {
+
+	/* WEBPACK VAR INJECTION */(function(global, process) {/**
+	 * Copyright (c) 2014, Facebook, Inc.
+	 * All rights reserved.
+	 *
+	 * This source code is licensed under the BSD-style license found in the
+	 * https://raw.github.com/facebook/regenerator/master/LICENSE file. An
+	 * additional grant of patent rights can be found in the PATENTS file in
+	 * the same directory.
+	 */
+
+	!(function(global) {
+	  "use strict";
+
+	  var hasOwn = Object.prototype.hasOwnProperty;
+	  var undefined; // More compressible than void 0.
+	  var $Symbol = typeof Symbol === "function" ? Symbol : {};
+	  var iteratorSymbol = $Symbol.iterator || "@@iterator";
+	  var toStringTagSymbol = $Symbol.toStringTag || "@@toStringTag";
+
+	  var inModule = typeof module === "object";
+	  var runtime = global.regeneratorRuntime;
+	  if (runtime) {
+	    if (inModule) {
+	      // If regeneratorRuntime is defined globally and we're in a module,
+	      // make the exports object identical to regeneratorRuntime.
+	      module.exports = runtime;
+	    }
+	    // Don't bother evaluating the rest of this file if the runtime was
+	    // already defined globally.
+	    return;
+	  }
+
+	  // Define the runtime globally (as expected by generated code) as either
+	  // module.exports (if we're in a module) or a new, empty object.
+	  runtime = global.regeneratorRuntime = inModule ? module.exports : {};
+
+	  function wrap(innerFn, outerFn, self, tryLocsList) {
+	    // If outerFn provided, then outerFn.prototype instanceof Generator.
+	    var generator = Object.create((outerFn || Generator).prototype);
+	    var context = new Context(tryLocsList || []);
+
+	    // The ._invoke method unifies the implementations of the .next,
+	    // .throw, and .return methods.
+	    generator._invoke = makeInvokeMethod(innerFn, self, context);
+
+	    return generator;
+	  }
+	  runtime.wrap = wrap;
+
+	  // Try/catch helper to minimize deoptimizations. Returns a completion
+	  // record like context.tryEntries[i].completion. This interface could
+	  // have been (and was previously) designed to take a closure to be
+	  // invoked without arguments, but in all the cases we care about we
+	  // already have an existing method we want to call, so there's no need
+	  // to create a new function object. We can even get away with assuming
+	  // the method takes exactly one argument, since that happens to be true
+	  // in every case, so we don't have to touch the arguments object. The
+	  // only additional allocation required is the completion record, which
+	  // has a stable shape and so hopefully should be cheap to allocate.
+	  function tryCatch(fn, obj, arg) {
+	    try {
+	      return { type: "normal", arg: fn.call(obj, arg) };
+	    } catch (err) {
+	      return { type: "throw", arg: err };
+	    }
+	  }
+
+	  var GenStateSuspendedStart = "suspendedStart";
+	  var GenStateSuspendedYield = "suspendedYield";
+	  var GenStateExecuting = "executing";
+	  var GenStateCompleted = "completed";
+
+	  // Returning this object from the innerFn has the same effect as
+	  // breaking out of the dispatch switch statement.
+	  var ContinueSentinel = {};
+
+	  // Dummy constructor functions that we use as the .constructor and
+	  // .constructor.prototype properties for functions that return Generator
+	  // objects. For full spec compliance, you may wish to configure your
+	  // minifier not to mangle the names of these two functions.
+	  function Generator() {}
+	  function GeneratorFunction() {}
+	  function GeneratorFunctionPrototype() {}
+
+	  var Gp = GeneratorFunctionPrototype.prototype = Generator.prototype;
+	  GeneratorFunction.prototype = Gp.constructor = GeneratorFunctionPrototype;
+	  GeneratorFunctionPrototype.constructor = GeneratorFunction;
+	  GeneratorFunctionPrototype[toStringTagSymbol] = GeneratorFunction.displayName = "GeneratorFunction";
+
+	  // Helper for defining the .next, .throw, and .return methods of the
+	  // Iterator interface in terms of a single ._invoke method.
+	  function defineIteratorMethods(prototype) {
+	    ["next", "throw", "return"].forEach(function(method) {
+	      prototype[method] = function(arg) {
+	        return this._invoke(method, arg);
+	      };
+	    });
+	  }
+
+	  runtime.isGeneratorFunction = function(genFun) {
+	    var ctor = typeof genFun === "function" && genFun.constructor;
+	    return ctor
+	      ? ctor === GeneratorFunction ||
+	        // For the native GeneratorFunction constructor, the best we can
+	        // do is to check its .name property.
+	        (ctor.displayName || ctor.name) === "GeneratorFunction"
+	      : false;
+	  };
+
+	  runtime.mark = function(genFun) {
+	    if (Object.setPrototypeOf) {
+	      Object.setPrototypeOf(genFun, GeneratorFunctionPrototype);
+	    } else {
+	      genFun.__proto__ = GeneratorFunctionPrototype;
+	      if (!(toStringTagSymbol in genFun)) {
+	        genFun[toStringTagSymbol] = "GeneratorFunction";
+	      }
+	    }
+	    genFun.prototype = Object.create(Gp);
+	    return genFun;
+	  };
+
+	  // Within the body of any async function, `await x` is transformed to
+	  // `yield regeneratorRuntime.awrap(x)`, so that the runtime can test
+	  // `value instanceof AwaitArgument` to determine if the yielded value is
+	  // meant to be awaited. Some may consider the name of this method too
+	  // cutesy, but they are curmudgeons.
+	  runtime.awrap = function(arg) {
+	    return new AwaitArgument(arg);
+	  };
+
+	  function AwaitArgument(arg) {
+	    this.arg = arg;
+	  }
+
+	  function AsyncIterator(generator) {
+	    function invoke(method, arg, resolve, reject) {
+	      var record = tryCatch(generator[method], generator, arg);
+	      if (record.type === "throw") {
+	        reject(record.arg);
+	      } else {
+	        var result = record.arg;
+	        var value = result.value;
+	        if (value instanceof AwaitArgument) {
+	          return Promise.resolve(value.arg).then(function(value) {
+	            invoke("next", value, resolve, reject);
+	          }, function(err) {
+	            invoke("throw", err, resolve, reject);
+	          });
+	        }
+
+	        return Promise.resolve(value).then(function(unwrapped) {
+	          // When a yielded Promise is resolved, its final value becomes
+	          // the .value of the Promise<{value,done}> result for the
+	          // current iteration. If the Promise is rejected, however, the
+	          // result for this iteration will be rejected with the same
+	          // reason. Note that rejections of yielded Promises are not
+	          // thrown back into the generator function, as is the case
+	          // when an awaited Promise is rejected. This difference in
+	          // behavior between yield and await is important, because it
+	          // allows the consumer to decide what to do with the yielded
+	          // rejection (swallow it and continue, manually .throw it back
+	          // into the generator, abandon iteration, whatever). With
+	          // await, by contrast, there is no opportunity to examine the
+	          // rejection reason outside the generator function, so the
+	          // only option is to throw it from the await expression, and
+	          // let the generator function handle the exception.
+	          result.value = unwrapped;
+	          resolve(result);
+	        }, reject);
+	      }
+	    }
+
+	    if (typeof process === "object" && process.domain) {
+	      invoke = process.domain.bind(invoke);
+	    }
+
+	    var previousPromise;
+
+	    function enqueue(method, arg) {
+	      function callInvokeWithMethodAndArg() {
+	        return new Promise(function(resolve, reject) {
+	          invoke(method, arg, resolve, reject);
+	        });
+	      }
+
+	      return previousPromise =
+	        // If enqueue has been called before, then we want to wait until
+	        // all previous Promises have been resolved before calling invoke,
+	        // so that results are always delivered in the correct order. If
+	        // enqueue has not been called before, then it is important to
+	        // call invoke immediately, without waiting on a callback to fire,
+	        // so that the async generator function has the opportunity to do
+	        // any necessary setup in a predictable way. This predictability
+	        // is why the Promise constructor synchronously invokes its
+	        // executor callback, and why async functions synchronously
+	        // execute code before the first await. Since we implement simple
+	        // async functions in terms of async generators, it is especially
+	        // important to get this right, even though it requires care.
+	        previousPromise ? previousPromise.then(
+	          callInvokeWithMethodAndArg,
+	          // Avoid propagating failures to Promises returned by later
+	          // invocations of the iterator.
+	          callInvokeWithMethodAndArg
+	        ) : callInvokeWithMethodAndArg();
+	    }
+
+	    // Define the unified helper method that is used to implement .next,
+	    // .throw, and .return (see defineIteratorMethods).
+	    this._invoke = enqueue;
+	  }
+
+	  defineIteratorMethods(AsyncIterator.prototype);
+
+	  // Note that simple async functions are implemented on top of
+	  // AsyncIterator objects; they just return a Promise for the value of
+	  // the final result produced by the iterator.
+	  runtime.async = function(innerFn, outerFn, self, tryLocsList) {
+	    var iter = new AsyncIterator(
+	      wrap(innerFn, outerFn, self, tryLocsList)
+	    );
+
+	    return runtime.isGeneratorFunction(outerFn)
+	      ? iter // If outerFn is a generator, return the full iterator.
+	      : iter.next().then(function(result) {
+	          return result.done ? result.value : iter.next();
+	        });
+	  };
+
+	  function makeInvokeMethod(innerFn, self, context) {
+	    var state = GenStateSuspendedStart;
+
+	    return function invoke(method, arg) {
+	      if (state === GenStateExecuting) {
+	        throw new Error("Generator is already running");
+	      }
+
+	      if (state === GenStateCompleted) {
+	        if (method === "throw") {
+	          throw arg;
+	        }
+
+	        // Be forgiving, per 25.3.3.3.3 of the spec:
+	        // https://people.mozilla.org/~jorendorff/es6-draft.html#sec-generatorresume
+	        return doneResult();
+	      }
+
+	      while (true) {
+	        var delegate = context.delegate;
+	        if (delegate) {
+	          if (method === "return" ||
+	              (method === "throw" && delegate.iterator[method] === undefined)) {
+	            // A return or throw (when the delegate iterator has no throw
+	            // method) always terminates the yield* loop.
+	            context.delegate = null;
+
+	            // If the delegate iterator has a return method, give it a
+	            // chance to clean up.
+	            var returnMethod = delegate.iterator["return"];
+	            if (returnMethod) {
+	              var record = tryCatch(returnMethod, delegate.iterator, arg);
+	              if (record.type === "throw") {
+	                // If the return method threw an exception, let that
+	                // exception prevail over the original return or throw.
+	                method = "throw";
+	                arg = record.arg;
+	                continue;
+	              }
+	            }
+
+	            if (method === "return") {
+	              // Continue with the outer return, now that the delegate
+	              // iterator has been terminated.
+	              continue;
+	            }
+	          }
+
+	          var record = tryCatch(
+	            delegate.iterator[method],
+	            delegate.iterator,
+	            arg
+	          );
+
+	          if (record.type === "throw") {
+	            context.delegate = null;
+
+	            // Like returning generator.throw(uncaught), but without the
+	            // overhead of an extra function call.
+	            method = "throw";
+	            arg = record.arg;
+	            continue;
+	          }
+
+	          // Delegate generator ran and handled its own exceptions so
+	          // regardless of what the method was, we continue as if it is
+	          // "next" with an undefined arg.
+	          method = "next";
+	          arg = undefined;
+
+	          var info = record.arg;
+	          if (info.done) {
+	            context[delegate.resultName] = info.value;
+	            context.next = delegate.nextLoc;
+	          } else {
+	            state = GenStateSuspendedYield;
+	            return info;
+	          }
+
+	          context.delegate = null;
+	        }
+
+	        if (method === "next") {
+	          // Setting context._sent for legacy support of Babel's
+	          // function.sent implementation.
+	          context.sent = context._sent = arg;
+
+	        } else if (method === "throw") {
+	          if (state === GenStateSuspendedStart) {
+	            state = GenStateCompleted;
+	            throw arg;
+	          }
+
+	          if (context.dispatchException(arg)) {
+	            // If the dispatched exception was caught by a catch block,
+	            // then let that catch block handle the exception normally.
+	            method = "next";
+	            arg = undefined;
+	          }
+
+	        } else if (method === "return") {
+	          context.abrupt("return", arg);
+	        }
+
+	        state = GenStateExecuting;
+
+	        var record = tryCatch(innerFn, self, context);
+	        if (record.type === "normal") {
+	          // If an exception is thrown from innerFn, we leave state ===
+	          // GenStateExecuting and loop back for another invocation.
+	          state = context.done
+	            ? GenStateCompleted
+	            : GenStateSuspendedYield;
+
+	          var info = {
+	            value: record.arg,
+	            done: context.done
+	          };
+
+	          if (record.arg === ContinueSentinel) {
+	            if (context.delegate && method === "next") {
+	              // Deliberately forget the last sent value so that we don't
+	              // accidentally pass it on to the delegate.
+	              arg = undefined;
+	            }
+	          } else {
+	            return info;
+	          }
+
+	        } else if (record.type === "throw") {
+	          state = GenStateCompleted;
+	          // Dispatch the exception by looping back around to the
+	          // context.dispatchException(arg) call above.
+	          method = "throw";
+	          arg = record.arg;
+	        }
+	      }
+	    };
+	  }
+
+	  // Define Generator.prototype.{next,throw,return} in terms of the
+	  // unified ._invoke helper method.
+	  defineIteratorMethods(Gp);
+
+	  Gp[iteratorSymbol] = function() {
+	    return this;
+	  };
+
+	  Gp[toStringTagSymbol] = "Generator";
+
+	  Gp.toString = function() {
+	    return "[object Generator]";
+	  };
+
+	  function pushTryEntry(locs) {
+	    var entry = { tryLoc: locs[0] };
+
+	    if (1 in locs) {
+	      entry.catchLoc = locs[1];
+	    }
+
+	    if (2 in locs) {
+	      entry.finallyLoc = locs[2];
+	      entry.afterLoc = locs[3];
+	    }
+
+	    this.tryEntries.push(entry);
+	  }
+
+	  function resetTryEntry(entry) {
+	    var record = entry.completion || {};
+	    record.type = "normal";
+	    delete record.arg;
+	    entry.completion = record;
+	  }
+
+	  function Context(tryLocsList) {
+	    // The root entry object (effectively a try statement without a catch
+	    // or a finally block) gives us a place to store values thrown from
+	    // locations where there is no enclosing try statement.
+	    this.tryEntries = [{ tryLoc: "root" }];
+	    tryLocsList.forEach(pushTryEntry, this);
+	    this.reset(true);
+	  }
+
+	  runtime.keys = function(object) {
+	    var keys = [];
+	    for (var key in object) {
+	      keys.push(key);
+	    }
+	    keys.reverse();
+
+	    // Rather than returning an object with a next method, we keep
+	    // things simple and return the next function itself.
+	    return function next() {
+	      while (keys.length) {
+	        var key = keys.pop();
+	        if (key in object) {
+	          next.value = key;
+	          next.done = false;
+	          return next;
+	        }
+	      }
+
+	      // To avoid creating an additional object, we just hang the .value
+	      // and .done properties off the next function object itself. This
+	      // also ensures that the minifier will not anonymize the function.
+	      next.done = true;
+	      return next;
+	    };
+	  };
+
+	  function values(iterable) {
+	    if (iterable) {
+	      var iteratorMethod = iterable[iteratorSymbol];
+	      if (iteratorMethod) {
+	        return iteratorMethod.call(iterable);
+	      }
+
+	      if (typeof iterable.next === "function") {
+	        return iterable;
+	      }
+
+	      if (!isNaN(iterable.length)) {
+	        var i = -1, next = function next() {
+	          while (++i < iterable.length) {
+	            if (hasOwn.call(iterable, i)) {
+	              next.value = iterable[i];
+	              next.done = false;
+	              return next;
+	            }
+	          }
+
+	          next.value = undefined;
+	          next.done = true;
+
+	          return next;
+	        };
+
+	        return next.next = next;
+	      }
+	    }
+
+	    // Return an iterator with no values.
+	    return { next: doneResult };
+	  }
+	  runtime.values = values;
+
+	  function doneResult() {
+	    return { value: undefined, done: true };
+	  }
+
+	  Context.prototype = {
+	    constructor: Context,
+
+	    reset: function(skipTempReset) {
+	      this.prev = 0;
+	      this.next = 0;
+	      // Resetting context._sent for legacy support of Babel's
+	      // function.sent implementation.
+	      this.sent = this._sent = undefined;
+	      this.done = false;
+	      this.delegate = null;
+
+	      this.tryEntries.forEach(resetTryEntry);
+
+	      if (!skipTempReset) {
+	        for (var name in this) {
+	          // Not sure about the optimal order of these conditions:
+	          if (name.charAt(0) === "t" &&
+	              hasOwn.call(this, name) &&
+	              !isNaN(+name.slice(1))) {
+	            this[name] = undefined;
+	          }
+	        }
+	      }
+	    },
+
+	    stop: function() {
+	      this.done = true;
+
+	      var rootEntry = this.tryEntries[0];
+	      var rootRecord = rootEntry.completion;
+	      if (rootRecord.type === "throw") {
+	        throw rootRecord.arg;
+	      }
+
+	      return this.rval;
+	    },
+
+	    dispatchException: function(exception) {
+	      if (this.done) {
+	        throw exception;
+	      }
+
+	      var context = this;
+	      function handle(loc, caught) {
+	        record.type = "throw";
+	        record.arg = exception;
+	        context.next = loc;
+	        return !!caught;
+	      }
+
+	      for (var i = this.tryEntries.length - 1; i >= 0; --i) {
+	        var entry = this.tryEntries[i];
+	        var record = entry.completion;
+
+	        if (entry.tryLoc === "root") {
+	          // Exception thrown outside of any try block that could handle
+	          // it, so set the completion value of the entire function to
+	          // throw the exception.
+	          return handle("end");
+	        }
+
+	        if (entry.tryLoc <= this.prev) {
+	          var hasCatch = hasOwn.call(entry, "catchLoc");
+	          var hasFinally = hasOwn.call(entry, "finallyLoc");
+
+	          if (hasCatch && hasFinally) {
+	            if (this.prev < entry.catchLoc) {
+	              return handle(entry.catchLoc, true);
+	            } else if (this.prev < entry.finallyLoc) {
+	              return handle(entry.finallyLoc);
+	            }
+
+	          } else if (hasCatch) {
+	            if (this.prev < entry.catchLoc) {
+	              return handle(entry.catchLoc, true);
+	            }
+
+	          } else if (hasFinally) {
+	            if (this.prev < entry.finallyLoc) {
+	              return handle(entry.finallyLoc);
+	            }
+
+	          } else {
+	            throw new Error("try statement without catch or finally");
+	          }
+	        }
+	      }
+	    },
+
+	    abrupt: function(type, arg) {
+	      for (var i = this.tryEntries.length - 1; i >= 0; --i) {
+	        var entry = this.tryEntries[i];
+	        if (entry.tryLoc <= this.prev &&
+	            hasOwn.call(entry, "finallyLoc") &&
+	            this.prev < entry.finallyLoc) {
+	          var finallyEntry = entry;
+	          break;
+	        }
+	      }
+
+	      if (finallyEntry &&
+	          (type === "break" ||
+	           type === "continue") &&
+	          finallyEntry.tryLoc <= arg &&
+	          arg <= finallyEntry.finallyLoc) {
+	        // Ignore the finally entry if control is not jumping to a
+	        // location outside the try/catch block.
+	        finallyEntry = null;
+	      }
+
+	      var record = finallyEntry ? finallyEntry.completion : {};
+	      record.type = type;
+	      record.arg = arg;
+
+	      if (finallyEntry) {
+	        this.next = finallyEntry.finallyLoc;
+	      } else {
+	        this.complete(record);
+	      }
+
+	      return ContinueSentinel;
+	    },
+
+	    complete: function(record, afterLoc) {
+	      if (record.type === "throw") {
+	        throw record.arg;
+	      }
+
+	      if (record.type === "break" ||
+	          record.type === "continue") {
+	        this.next = record.arg;
+	      } else if (record.type === "return") {
+	        this.rval = record.arg;
+	        this.next = "end";
+	      } else if (record.type === "normal" && afterLoc) {
+	        this.next = afterLoc;
+	      }
+	    },
+
+	    finish: function(finallyLoc) {
+	      for (var i = this.tryEntries.length - 1; i >= 0; --i) {
+	        var entry = this.tryEntries[i];
+	        if (entry.finallyLoc === finallyLoc) {
+	          this.complete(entry.completion, entry.afterLoc);
+	          resetTryEntry(entry);
+	          return ContinueSentinel;
+	        }
+	      }
+	    },
+
+	    "catch": function(tryLoc) {
+	      for (var i = this.tryEntries.length - 1; i >= 0; --i) {
+	        var entry = this.tryEntries[i];
+	        if (entry.tryLoc === tryLoc) {
+	          var record = entry.completion;
+	          if (record.type === "throw") {
+	            var thrown = record.arg;
+	            resetTryEntry(entry);
+	          }
+	          return thrown;
+	        }
+	      }
+
+	      // The context.catch method must only be called with a location
+	      // argument that corresponds to a known catch block.
+	      throw new Error("illegal catch attempt");
+	    },
+
+	    delegateYield: function(iterable, resultName, nextLoc) {
+	      this.delegate = {
+	        iterator: values(iterable),
+	        resultName: resultName,
+	        nextLoc: nextLoc
+	      };
+
+	      return ContinueSentinel;
+	    }
+	  };
+	})(
+	  // Among the various tricks for obtaining a reference to the global
+	  // object, this seems to be the most reliable technique that does not
+	  // use indirect eval (which violates Content Security Policy).
+	  typeof global === "object" ? global :
+	  typeof window === "object" ? window :
+	  typeof self === "object" ? self : this
+	);
+
+	/* WEBPACK VAR INJECTION */}.call(exports, (function() { return this; }()), __webpack_require__(91)))
+
+/***/ }
+/******/ ])
+});
+;

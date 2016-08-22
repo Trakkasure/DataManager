@@ -1,6 +1,0 @@
-{
-    "name": "dm"
-  , "dependencies": {
-      "matthewp/xhr":"*"
-    }
-}
