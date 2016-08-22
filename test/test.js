@@ -1,4 +1,4 @@
-var dataManager = require("./dataManager.js").DataManager;
+var dataManager = require("../dist/index.js");
 var expect = require('expect');
 var chai=require('chai');
 var crossfilter = require('crossfilter');
@@ -66,6 +66,9 @@ var schema = {
                 // If not specifying this field, then use the dimension filter field
                 //, map: "date" // group by date. Dates are by day anyhow
               , "sum": "quantity" // sum the invoice quantity field.
+            }
+          , 'types': {
+              'reduce': 'count'
             }
           , "total": {
                 "reduce" : "sum" // reduce by summing
@@ -371,50 +374,49 @@ var schema = {
 
                 try {
                   DM.filter('total',[100,190])
-                  expect(DM.getDimension('date').top(Infinity).slice(0).every(function(d) { return d.total >= 100; })).to.be.true
+                  expect(DM.getDimension('date').top(Infinity).slice(0).every(function(d) { return d.total >= 100; })).toBe(true)
                   DM.filter('total',[110,190])
-                  expect(DM.getDimension('date').top(Infinity).slice(0).every(function(d) { return d.total >= 110; })).to.be.true
+                  expect(DM.getDimension('date').top(Infinity).slice(0).every(function(d) { return d.total >= 110; })).toBe(true)
                 } finally {
                   DM.filter('total',DM.NONE)
                 }
                 try {
                   DM.filter('total',[100,200])
-                  expect(DM.getDimension('date').top(Infinity).slice(0).every(function(d) { return d.total < 200; })).to.be.true
+                  expect(DM.getDimension('date').top(Infinity).slice(0).every(function(d) { return d.total < 200; })).toBe(true)
                   DM.filter('total',[100,190])
-                  expect(DM.getDimension('date').top(Infinity).slice(0).every(function(d) { return d.total < 190; })).to.be.true
+                  expect(DM.getDimension('date').top(Infinity).slice(0).every(function(d) { return d.total < 190; })).toBe(true)
                 } finally {
                   DM.filter('total',DM.NONE)
                 }
-
                   DM.filter('total',[100,200])
-                  expect(DM.getDimension('date').top(Infinity).slice(0).length).to.be.below(43)
+                  expect(DM.getDimension('date').top(Infinity).slice(0).length).toBeLessThan(43)
                   DM.filter('total',DM.NONE)
-                  expect(DM.getDimension('date').top(Infinity).slice(0).length).isEqual(43)
+                  expect(DM.getDimension('date').top(Infinity).slice(0).length).toBe(43)
 
                 try {
                   DM.filter('total',[0, 100], 190, [200, 300])
+                  expect(DM.getDimension('total').top(Infinity).length).toBe(38)
                   expect(DM.getDimension('total').top(Infinity).slice(0).every(function(d){
                     return d.total >= 0 && d.total < 100 || d.total >= 200 && d.total < 300 || d.total == 190;
-                  })).to.be.true
-                  expect(DM.getDimension('total').top(Infinity).length).isEqual(38)
+                  })).toBe(true)
                 } finally {
                   DM.filter('total',DM.NONE)
                 }
                 try {
                   DM.filter('total',[0, 100], 190, [200, 300])
                   DM.filter('total',[200, 300])
-                  expect(DM.all().value()).isEqual(8)
+                  expect(DM.all().value()).toBe(8)
                 } finally {
                   DM.filter('total',DM.NONE)
                 }
                 try {
-                  expect(DM.filter('total',190, [0, 100], [200, 300])).isEqual(DM);
+                  expect(DM.filter('total',190, [0, 100], [200, 300])).toBe(DM);
                 } finally {
                   DM.filter('total',DM.NONE)
                 }
                 try {
                   DM.filter('total',[0, 200], 190);
-                  expect(DM.getDimension('total').top(Infinity).length).isEqual(34)
+                  expect(DM.getDimension('total').top(Infinity).length).toBe(34)
                 } finally {
                   DM.filter('total',DM.NONE)
                 }
@@ -422,8 +424,8 @@ var schema = {
                   DM.filter('total',function(d) { return d === 100; })
                   expect(DM.getDimension('total').top(Infinity).every(function(d) {
                     return d.total === 100
-                  })).to.be.true
-                  expect(DM.getDimension('total').top(Infinity).length).isEqual(4)
+                  })).toBe(true)
+                  expect(DM.getDimension('total').top(Infinity).length).toBe(4)
                 } finally {
                   DM.filter('total',DM.NONE)
                 }
@@ -431,85 +433,85 @@ var schema = {
                   DM.filter('total',function(d) { return d === 190; })
                   DM.all().value()
                   DM.filter('total',function(d) { return d === 100; })
-                  expect(DM.all().value()).isEqual(4)
-                  expect(DM.getDimension('total').top(Infinity).length).isEqual(4)
+                  expect(DM.all().value()).toBe(4)
+                  expect(DM.getDimension('total').top(Infinity).length).toBe(4)
                 } finally {
                   DM.filter('total',DM.NONE)
                 }
 
               var quantityCount = DM.getDimension('qty').groupAll()
-              expect(quantityCount).to.not.contain.keys('top','order')
+              expect(quantityCount).toNotIncludeKeys(['top','order'])
 
                   try {
                     quantityCount.reduce(
                         function(p, v) { return p + v.total },
                         function(p, v) { return p - v.total },
                         function() { return 0 })
-                    expect(quantityCount.value()).isEqual(6660)
+                    expect(quantityCount.value()).toBe(6660)
                   } finally {
                     quantityCount.reduceCount()
                   }
 
                   quantityCount.reduceSum(function(d) { return d.total })
-                  expect(quantityCount.value()).isEqual(6660)
+                  expect(quantityCount.value()).toBe(6660)
                   quantityCount.reduceCount()
-                  expect(quantityCount.value()).isEqual(43)
+                  expect(quantityCount.value()).toBe(43)
 
                   try {
                     quantityCount.reduceSum(function(d) { return d.total })
-                    expect(quantityCount.value()).isEqual(6660)
+                    expect(quantityCount.value()).toBe(6660)
                     quantityCount.reduceSum(function() { return 1 })
-                    expect(quantityCount.value()).isEqual(43)
+                    expect(quantityCount.value()).toBe(43)
                   } finally {
                     quantityCount.reduceCount();
                   }
 
-                    expect(quantityCount.value()).isEqual(43)
+                    expect(quantityCount.value()).toBe(43)
                   try {
                     DM.filter('qty',[100, 200])
-                    expect(quantityCount.value()).isEqual(43)
+                    expect(quantityCount.value()).toBe(43)
                   } finally {
                     DM.filter('qty',DM.NONE)
                   }
                   try {
                     DM.filter('type',"tab")
-                    expect(quantityCount.value()).isEqual(32)
+                    expect(quantityCount.value()).toBe(32)
                     DM.filter('type',"visa")
-                    expect(quantityCount.value()).isEqual(7)
+                    expect(quantityCount.value()).toBe(7)
                     DM.filter('tip',100)
-                    expect(quantityCount.value()).isEqual(5)
+                    expect(quantityCount.value()).toBe(5)
                   } finally {
                     DM.filter('type',DM.NONE)
                     DM.filter('tip',DM.NONE)
                   }
 
                 var quantityTotal = DM.getDimension('qty').groupAll().reduceSum(function(d) { return d.total })
-                expect(quantityTotal).to.not.contain.keys('top','order')
+                expect(quantityTotal).toNotIncludeKeys(['top','order'])
 
                   try {
                     quantityTotal.reduce(
                         function(p) { return p + 1; },
                         function(p) { return p - 1; },
                         function() { return 0 })
-                    expect(quantityTotal.value()).isEqual(43)
+                    expect(quantityTotal.value()).toBe(43)
                   } finally {
                     quantityTotal.reduceSum(function(d) { return d.total })
                   }
 
-                    expect(quantityTotal.value()).isEqual(6660)
+                    expect(quantityTotal.value()).toBe(6660)
                   try {
                     DM.filter('qty',[100, 200])
-                    expect(quantityTotal.value()).isEqual(6660)
+                    expect(quantityTotal.value()).toBe(6660)
                   } finally {
                     DM.filter('qty',DM.NONE)
                   }
                   try {
                     DM.filter('type',"tab")
-                    expect(quantityTotal.value()).isEqual(4760)
+                    expect(quantityTotal.value()).toBe(4760)
                     DM.filter('type',"visa")
-                    expect(quantityTotal.value()).isEqual(1400)
+                    expect(quantityTotal.value()).toBe(1400)
                     DM.filter('tip',100)
-                    expect(quantityTotal.value()).isEqual(1000)
+                    expect(quantityTotal.value()).toBe(1000)
                   } finally {
                     DM.filter('type',DM.NONE)
                     DM.filter('tip',DM.NONE)
@@ -518,27 +520,25 @@ var schema = {
             //data.date.hours = data.date.group(function(d) { d = new Date(+d); d.setHours(d.getHours(), 0, 0, 0); return d; });
             //data.type.types = data.type.group();
 
-                expect(DM.group('type').top(Infinity)).toInclude([
+                expect(DM.group('type','types').top(Infinity)).toInclude([
                     {key: "tab", value: 32}
                   , {key: "visa", value: 7}
                   , {key: "cash", value: 4}
                 ],function(b,a){return expect(a).toInclude(b);})
 
-                expect(data.date.hours.size()).isEqual(8)
-                expect(data.type.types.size()).isEqual(3)
+                expect(DM.group('date','hours').size()).toBe(8)
+                expect(DM.group('type','types').size()).toBe(3)
                 try {
-                  data.type.filterExact("tab")
-                  data.quantity.filterRange([100, 200])
-                  expect(data.date.hours.size()).isEqual(8)
-                  expect(data.type.types.size()).isEqual(3)
+                  DM.filter('type',"tab");
+                  DM.filter('qty',[100, 200]);
+                  expect(DM.group('date','hours').size()).toBe(8)
+                  expect(DM.group('type','types').size()).toBe(3)
                 } finally {
-                  data.quantity.filterAll()
-                  data.type.filterAll()
+                  DM.filter('qty',DM.NONE);
+                  DM.filter('type',DM.NONE);
                 }
 
-/*
-            describe("reduce", function() {
-              it("defaults to count", function() {
+/* 
                 assert.deepEqual(data.date.hours.top(1), [
                   {key: new Date(Date.UTC(2011, 10, 14, 17, 00, 00)), value: 9}
                 ])
@@ -598,7 +598,6 @@ var schema = {
                 }
               })
             })
-          })
 
           describe("remove", function() {
             it("should remove dimension", function() {
@@ -618,14 +617,14 @@ var schema = {
               data.all = DM.all().reduceSum(function(d) { return d.total })
 
             it("does not have top and order methods", function() {
-                expect(data.all).to.not.contain.keys('top','order')
+                expect(data.all).toNotIncludeKeys(['top','order'])
             })
 
             describe("reduce", function() {
               it("determines the computed reduce value", function() {
                 try {
                   data.all.reduceCount()
-                  expect(data.all.value()).isEqual(43)
+                  expect(data.all.value()).toBe(43)
                 } finally {
                   data.all.reduceSum(function(d) { return d.total })
                 }
@@ -766,7 +765,7 @@ var schema = {
             })
         })
 /* */
-
+console.log("All Ok.");
 function key(d) {
   return d.key;
 }
